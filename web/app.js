@@ -377,7 +377,7 @@ function renderBoard() {
     if (da !== db) return da < db ? -1 : 1;
     return (Number(a && a.day) || 0) - (Number(b && b.day) || 0);
   });
-  dom.boardSub.textContent = (plan.destination || '') +
+  dom.boardSub.textContent = (plan.origin ? plan.origin + ' → ' : '') + (plan.destination || '') +
     (plan.startDate && plan.endDate ? ' · ' + plan.startDate + ' → ' + plan.endDate : '') +
     ' · ' + days.length + ' 天';
 
@@ -391,10 +391,50 @@ function renderBoard() {
     ]));
   }
 
+  const alternatives = Array.isArray(plan.alternatives) ? plan.alternatives : [];
   const risks = Array.isArray(plan.risks) ? plan.risks : [];
   const unconfirmed = Array.isArray(plan.unconfirmed) ? plan.unconfirmed : [];
+  if (alternatives.length) host.appendChild(renderAlternativesSection(alternatives, plan));
   if (risks.length) host.appendChild(renderRiskSection(risks));
   if (unconfirmed.length) host.appendChild(renderUnconfirmedSection(unconfirmed));
+}
+
+/** 第二轮：跨城决策的本地替代对比（成本 / 耗时 / 体验 / 结论） */
+function renderAlternativesSection(alts, plan) {
+  const cur = currencyOf(plan);
+  const section = el('section', { class: 'board-section', id: 'board-alternatives' }, [
+    el('div', { class: 'board-section-head' }, [
+      el('span', { class: 'board-section-title', text: '本地替代对比' }),
+      el('span', { class: 'board-section-count', text: alts.length + ' 项' }),
+    ]),
+  ]);
+  for (const alt of alts) {
+    const rec = String(alt.recommendation || 'keep');
+    const recLabel = rec === 'switch' ? '改本地' : rec === 'downgrade' ? '降级' : '保留';
+    const delta = Number(alt.costDelta || 0);
+    section.appendChild(el('article', { class: 'alt-card' }, [
+      el('div', { class: 'alt-head' }, [
+        el('span', { class: 'alt-decision', text: alt.decision || ((alt.fromCity || '') + ' → ' + (alt.toCity || '')) }),
+        el('span', { class: 'chip chip-alt-' + rec, text: recLabel }),
+      ]),
+      el('div', { class: 'alt-grid' }, [
+        altRow('采用方案', alt.chosen),
+        altRow('本地替代', alt.localAlternative),
+        altRow('成本对比', fmtMoney(alt.chosenCost, cur) + '  vs  ' + fmtMoney(alt.localCost, cur) + '（差 ' + fmtMoney(delta, cur) + '）'),
+        altRow('耗时对比', (alt.chosenTime || '—') + '  vs  ' + (alt.localTime || '—')),
+        altRow('体验增益', alt.experienceGain),
+        altRow('结论依据', alt.rationale),
+      ]),
+    ]));
+  }
+  return section;
+}
+
+function altRow(label, value) {
+  return el('div', { class: 'alt-row' }, [
+    el('span', { class: 'alt-label', text: label }),
+    el('span', { class: 'alt-value', text: value || '—' }),
+  ]);
 }
 
 function renderDayCard(day, plan) {
@@ -436,6 +476,7 @@ function renderActivity(act, cur) {
   }
 
   const sub = el('div', { class: 'act-sub' }, [
+    act.city ? el('span', { class: 'act-city', title: '所在城市', text: act.city }) : null,
     el('span', { text: act.location || '地点未知' }),
     el('span', { text: '· ' + fmtDuration(act.durationMin) }),
     el('span', { class: 'act-src', text: act.source || '来源未知' }),
@@ -1285,6 +1326,7 @@ async function submitTripForm(event) {
 
   const fd = new FormData(dom.tripForm);
   const destination = String(fd.get('destination') || '').trim();
+  const origin = String(fd.get('origin') || '').trim();
   const title = String(fd.get('title') || '').trim();
   const startDate = String(fd.get('startDate') || '');
   const endDate = String(fd.get('endDate') || '');
@@ -1299,6 +1341,7 @@ async function submitTripForm(event) {
   if (!Number.isFinite(budgetTotal) || budgetTotal < 0) return showFormError('总预算不能为负数。');
 
   const payload = {
+    origin: origin,
     destination: destination,
     startDate: startDate,
     endDate: endDate,

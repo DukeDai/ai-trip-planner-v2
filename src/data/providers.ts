@@ -7,7 +7,7 @@ import type {
   ToolEnvelope,
   WeatherDay
 } from "../core/types.ts";
-import { SEED_COUNTRIES, matchSeedPlaces, type SeedPlace } from "./seed.ts";
+import { COUNTRY_FACT_SOURCE, matchCountryFact } from "./country-facts.ts";
 import { searchWikidata, wikipediaSummary } from "./wikidata.ts";
 
 const WMO_TEXT: Record<number, string> = {
@@ -62,25 +62,6 @@ export function haversineMeters(lat1: number, lon1: number, lat2: number, lon2: 
     Math.sin(dLat / 2) ** 2 +
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
   return 2 * R * Math.asin(Math.sqrt(a));
-}
-
-function seedToCandidate(s: SeedPlace): PlaceCandidate {
-  return {
-    id: s.id,
-    name: s.name,
-    category: s.category,
-    city: s.city,
-    address: s.area,
-    lat: s.lat,
-    lon: s.lon,
-    openingHours: s.openingHours,
-    ticketRange: s.ticket ?? undefined,
-    durationMin: s.durationMin,
-    tips: s.tips,
-    source: "内置离线种子库（需复核）",
-    confidence: "medium",
-    verified: false
-  };
 }
 
 export class TravelData {
@@ -350,10 +331,6 @@ export class TravelData {
       }
     }
 
-    for (const s of matchSeedPlaces(query, city, limit)) {
-      out.push(seedToCandidate(s));
-    }
-
     const deduped: PlaceCandidate[] = [];
     for (const c of out) {
       if (!Number.isFinite(c.lat) || !Number.isFinite(c.lon)) continue;
@@ -568,24 +545,25 @@ export class TravelData {
         { provider: "restcountries", source: "RestCountries", confidence: "high", url }
       );
     }
-    const seed = SEED_COUNTRIES[country];
-    if (seed) {
+    // 兜底：内置事实表（**非 API**）。只放国家级元数据，不含任何 POI/票价/开放时间。
+    const fact = matchCountryFact(country);
+    if (fact) {
       return envelope(
         "degraded",
         {
-          name: seed.name,
-          code: seed.code,
-          capital: seed.capital,
-          currencies: seed.currencies,
-          languages: seed.languages,
-          timezones: seed.timezones,
-          drivingSide: seed.drivingSide,
-          region: seed.region,
-          source: "内置离线国别表",
+          name: fact.name,
+          code: fact.code,
+          capital: fact.capital,
+          currencies: fact.currencies,
+          languages: fact.languages,
+          timezones: fact.timezones,
+          drivingSide: fact.drivingSide,
+          region: fact.region,
+          source: COUNTRY_FACT_SOURCE,
           confidence: "medium"
         },
-        { provider: "offline", source: "内置离线国别表", confidence: "medium" },
-        "RestCountries 不可用，使用内置离线国别表"
+        { provider: "offline-facts", source: COUNTRY_FACT_SOURCE, confidence: "medium" },
+        "RestCountries 不可用，使用内置事实表（非 API）"
       );
     }
     return envelope<CountryFacts>(

@@ -34,6 +34,7 @@
 5. **产物落盘**：每次规划产出固定 6 个文件（§10），可下载。
 6. **多轮改签**：支持「把第 3 天改成艺术主题」「预算砍 20%」这类指令，agent 就地改写并标注 diff。
 7. **可观测**：SSE 实时推送 todo 进度、工具调用、子代理委派、token 流。
+8. **无内置假数据**（第二轮）：任何 POI、票价、开放时间只能来自 API，取不到就标 `unavailable` + `verified:false`；内置事实表仅限国家元数据，且必须标注「内置事实表（非 API）」。
 
 ## 3. 明确不做（OUT OF SCOPE）
 
@@ -67,13 +68,19 @@
 
 | 工具 | 作用 | 主数据源 | 回退链 |
 |---|---|---|---|
-| `geocode` | 地点 → 坐标 | Open-Meteo Geocoding | Nominatim → Photon |
-| `search_places` | POI/景点/餐厅/酒店检索 | Wikidata（结构化事实） | 高德（有 key）→ Photon → Nominatim → 内置种子库 |
-| `get_weather` | 逐日天气（气温/降水概率/风/日出日落） | Open-Meteo | WTTR.in |
-| `get_route` | 点到点距离/时长 | OSRM（自驾） | 直线距离 × 经验系数（步行/骑行/自驾降级） |
-| `get_country_facts` | 货币/语言/时区/驾驶方向 | RestCountries | 内置离线国别表 |
+| `tool_search` | **元工具**：按关键词/数据域检索细粒度工具目录并装载 | 本地目录（零网络） | — |
+| `geocode_place` | 地点 → 坐标 | Open-Meteo Geocoding | Nominatim → Photon |
+| `search_sights` | 景点/文化/自然/亲子/夜景检索 | Wikidata（结构化事实） | 高德（有 key）→ Photon → Nominatim |
+| `search_food` | 餐厅/市集/早餐/特色餐饮检索 | 同上 | 同上 |
+| `search_lodging` | 酒店/民宿/住宿区域检索 | 同上 | 同上 |
+| `search_transport_hub` | 机场/车站/码头检索 | 同上 | 同上 |
+| `get_daily_weather` | 逐日天气（气温/降水概率/风/日出日落） | Open-Meteo | — |
+| `measure_travel_time` | 点到点距离/通勤时长 | OSRM（自驾） | 直线距离 × 经验系数（步行/骑行/自驾降级） |
+| `get_country_profile` | 货币/语言/时区/驾驶方向 | RestCountries | 内置事实表（非 API） |
 | `compute_budget` | 汇总预算、明细合计、差额与占比告警 | 内部（口径来自 Skill） | — |
-| `submit_itinerary` | 对 `/itinerary.json` 做机器校验（强制关卡） | 内部（SPEC §10 规则） | — |
+| `find_local_alternative` | **本地替代方案**检索：同一城市内体验等价的替代点位 | 同 `search_sights` | — |
+| `review_itinerary` | **审查关卡**：读行程单 + 事实包，LLM 审查并出具结构化问题清单 | 内部（§15.2 B） | — |
+| `submit_itinerary` | 机器校验 + 审查门禁（强制关卡） | 内部（SPEC §10 规则） | — |
 | `finalize_itinerary` | 定稿（触发 HITL） | — | — |
 
 **地点描述补全**：检索结果里的前两条会再查一次维基百科摘要，拿到人话介绍与坐标交叉验证。
@@ -95,8 +102,11 @@
 | `stay` 住宿区位 | 分区建议、到核心 POI 的可达性矩阵 | `research/stay.md` |
 | `sights` 景点情报 | 景点清单、开放时间、票价区间、必订标记 | `research/sights.md` |
 | `food` 餐饮策划 | 餐饮安排、忌口过滤、预算档位 | `research/food.md` |
+| `reviewer` 行程审查员 | 对照需求/事实审查行程单，出具结构化问题清单与本地替代建议 | `/review/report.json` |
 
-主代理：需求澄清 → 并行委派 → 汇总编排 → 预算校验 → 写产物 → HITL 定稿。
+> `reviewer` 由 `review_itinerary` 工具直接驱动（工具内部调用独立模型实例），不走 `task` 委派 —— 审查是**强制关卡**，不能靠模型自觉。
+
+主代理：需求澄清 → 并行委派 → 汇总编排 → 预算校验 → 写产物 → **reviewer 审查（≤3 轮）** → 机器校验 → HITL 定稿。
 
 ## 7. Skills 清单（`src/agent/skills/`）
 
@@ -131,7 +141,7 @@
 
 ```jsonc
 {
-  "tripId": "…", "destination": "…", "startDate": "2026-12-01", "endDate": "2026-12-05",
+  "tripId": "…", "origin": "…", "destination": "…", "startDate": "2026-12-01", "endDate": "2026-12-05",
   "travelers": { "count": 2, "budgetTotal": 100000, "currency": "CNY" },
   "days": [{
     "day": 1, "date": "2026-12-01", "theme": "…", "totalCost": 3200,
@@ -139,16 +149,52 @@
       "time": "09:30", "title": "…", "type": "sight|food|transport|stay|free",
       "location": "…", "durationMin": 120, "costPerPerson": 120, "costTotal": 240,
       "notes": "…", "source": "…", "fetchedAt": "…", "confidence": "high|medium|low",
-      "needsBooking": true, "bookingLeadDays": 14, "verified": true
+      "needsBooking": true, "bookingLeadDays": 14, "verified": true,
+      // 第二轮新增：城市归属与坐标 —— 机器校验与 reviewer 审查都靠它
+      "city": "…", "lat": 39.9, "lon": 116.4,
+      // 仅 transport 类需要：显式跨城起终点
+      "fromCity": "…", "toCity": "…"
     }]
   }],
   "budget": { "lines": [{ "category": "stay|transport|sight|food|other", "label": "…", "amount": 0, "unit": "…", "confidence": "…" }], "total": 0, "planned": 0, "delta": 0 },
   "risks": [{ "level": "high|medium|low", "title": "…", "mitigation": "…" }],
-  "unconfirmed": [{ "item": "…", "reason": "…", "howToVerify": "…" }]
+  "unconfirmed": [{ "item": "…", "reason": "…", "howToVerify": "…" }],
+  // 第二轮新增：跨城/远距离决策的本地替代对比（跨城行程必填）
+  "alternatives": [{
+    "decision": "上海 → 京都 3 天",
+    "fromCity": "上海", "toCity": "京都",
+    "chosen": "…", "localAlternative": "…",
+    "chosenCost": 12000, "localCost": 1800, "costDelta": 10200,
+    "chosenTime": "…", "localTime": "…",
+    "experienceGain": "…",
+    "recommendation": "keep|downgrade|switch",
+    "rationale": "…"
+  }]
 }
 ```
 
-**校验规则**：`budget.total === sum(lines.amount)`；`day.totalCost === sum(activities.costTotal)`；`grandTotal === sum(days)`；任何 `verified:false` 必须出现在 `unconfirmed`。校验失败则写盘失败并报错，不得产出半成品。
+**校验规则（§10 一致性 + §15.2 A 行程合理性，硬门槛）**
+
+一致性：
+1. `budget.total === sum(lines.amount)`
+2. `day.totalCost === sum(activities.costTotal)`
+3. `grandTotal === sum(days)`
+4. `budget.delta === total - planned`，且 `planned === travelers.budgetTotal`
+5. 任何 `verified:false` 必须出现在 `unconfirmed`
+6. `needsBooking:true` 必须给出 `bookingLeadDays`
+
+行程合理性（第二轮新增，缺一即打回）：
+7. **时间单调不减**：同一天 activities 的 `time`（HH:mm）不得倒退
+8. **地理连贯性**：相邻两条非交通条目的直线距离 ≤ 80km，否则报「地理跳变」（中间缺交通衔接）
+9. **到达前禁排目的地活动**：按时间顺序推进城市轨迹，`origin` 是起点；
+   任何非交通条目的 `city` 必须等于「当前所在城市」
+10. **跨城移动必须显式出现**：城市变化只能由 `type=transport` 且带 `fromCity`/`toCity` 的条目产生；
+    交通条目的 `fromCity` 必须等于当前所在城市
+11. **点位属于当日可达城市集合**：由第 9/10 条推导，`city` 不得超出当日可达集合
+12. **本地替代硬规则**：出现跨城（`fromCity !== toCity`）时，`alternatives` 必须有对应条目，
+    且写清本地替代、成本差、耗时、体验维度与结论；缺任一项即报错
+
+校验失败则写盘失败并报错，不得产出半成品。
 
 ## 11. HTTP API 契约
 
@@ -295,3 +341,34 @@ SSE 事件类型：`status`、`todo`、`tool`、`subagent`、`token`、`artifact
    （如「上海本地替代方案 + 成本差」）。
 4. 产物中不再出现任何内置假 POI；取不到的条目标 `verified: false` 且进 `unconfirmed`。
 5. 浏览器实测：看板顺序、预算口径、放行续跑、产物列表全正常。
+
+### 15.6 实施约定（第二轮落地细节）
+
+**去假数据**
+- `src/data/seed.ts` 整体删除（36 条凭记忆写的 POI 假数据 + 其单测一并移除）。
+- POI 只允许来自 API：Wikidata / OSM(Nominatim、Photon) / 高德（配 key 时）/ 维基百科摘要。
+- 国别元数据移入 `src/data/country-facts.ts`，来源固定标注「**内置事实表（非 API）**」，
+  且只在 RestCountries 不可用时兜底。
+
+**机器校验**
+- `src/core/schema.ts` 增补 §10 的第 7–12 条规则。
+- `city` / `lat` / `lon` 由 agent 从 `search_*` / `geocode_place` 的返回值抄进行程单；
+  字段缺失时**跳过该项校验**而不是猜测（宁可少查也不误杀）。
+
+**reviewer 关卡**
+- 工具层维护**事实包** `research/facts.json`：每次数据工具调用成功即追加一条事实
+  （路线耗时/距离、天气、票价、开放时间、坐标）。reviewer 只吃这份事实包 + 行程单，不允许脑补。
+- `review_itinerary` 工具内部直接调用审查模型（独立模型实例，thinking 关闭），
+  产出 `/review/report.json`；`submit_itinerary` 校验报告里的 `planHash` 是否等于当前
+  `itinerary.json` 的哈希 —— 改稿后必须重新审查。
+- 审查最多 3 轮：第 4 轮仍未通过，`submit_itinerary` 直接拒绝并说明。
+- 有 `blocking` 问题 → 报告 `approved:false`，主代理必须改稿后重新 `review_itinerary`。
+
+**tool search**
+- `langchain@1.6` 只有 `providerToolSearchMiddleware`（仅 OpenAI gpt-5.4+ / Claude Sonnet 4+），
+  当前模型 MiniMax-M3 用不了 → 默认走**本地实现**。
+- 本地实现 = 细粒度工具目录（`src/agent/tool-catalog.ts`）+ `tool_search` 元工具 +
+  `localToolSearchMiddleware`：按对话上下文对目录做关键词打分，只把命中的工具挂给模型；
+  模型也可主动 `tool_search` 精确装载。
+- 开关：`TRIP_TOOL_SEARCH=local|provider|none`，默认 `local`；
+  `provider` 挂 `providerToolSearchMiddleware`（换 Claude/GPT-5.4+ 时才可用）。

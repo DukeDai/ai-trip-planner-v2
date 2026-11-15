@@ -4,6 +4,14 @@ import path from "node:path";
 
 export type LlmProvider = "anthropic" | "openai";
 
+/**
+ * 工具检索方式：
+ * - local：本地实现（细粒度目录 + tool_search 元工具 + 按上下文裁剪工具列表）—— 默认
+ * - provider：provider 原生 tool search（仅 OpenAI gpt-5.4+ / Claude Sonnet 4+，其他模型会抛错）
+ * - none：不裁剪，全量工具挂给模型
+ */
+export type ToolSearchMode = "local" | "provider" | "none";
+
 export interface LlmConfig {
   provider: LlmProvider;
   model: string;
@@ -14,6 +22,8 @@ export interface LlmConfig {
   thinking: "enabled" | "disabled";
   /** 子代理专用模型（留空则与主模型相同） */
   subagentModel?: string;
+  /** 工具检索方式 */
+  toolSearch: ToolSearchMode;
 }
 
 export interface PgConfig {
@@ -106,7 +116,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       apiKey,
       keySource,
       thinking: env.TRIP_LLM_THINKING === "enabled" ? "enabled" : "disabled",
-      subagentModel: env.TRIP_LLM_SUBAGENT_MODEL?.trim() || undefined
+      subagentModel: env.TRIP_LLM_SUBAGENT_MODEL?.trim() || undefined,
+      toolSearch: readToolSearchMode(env.TRIP_TOOL_SEARCH)
     },
     pg,
     amapKey: env.AMAP_KEY?.trim() || undefined,
@@ -115,3 +126,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
 }
 
 export class ConfigError extends Error {}
+
+/** 解析 TRIP_TOOL_SEARCH；非法值回落到 local（不静默关掉检索能力） */
+export function readToolSearchMode(raw: string | undefined): ToolSearchMode {
+  const v = (raw ?? "").trim().toLowerCase();
+  if (v === "provider" || v === "none" || v === "local") return v;
+  return "local";
+}

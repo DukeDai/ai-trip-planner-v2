@@ -42,7 +42,7 @@ test("geocode：全部源失败时返回 unavailable 而不是抛错", async () 
   assert.match(res.error ?? "", /不可用/);
 });
 
-test("search_places：Photon 与种子库同时兜底", async () => {
+test("search_places：只走真实 API，不再注入任何种子库数据", async () => {
   const http = fakeHttp((url) => {
     if (url.includes("photon.komoot.io")) {
       return {
@@ -63,14 +63,23 @@ test("search_places：Photon 与种子库同时兜底", async () => {
   assert.equal(res.ok, true);
   const names = (res.data ?? []).map((p) => p.name);
   assert.ok(names.includes("故宫博物院"));
-  // 同名同坐标的条目应合并：Photon 命中但缺营业时间，种子库补上
   const merged = (res.data ?? []).find((p) => p.name === "故宫博物院");
   assert.ok(merged);
   assert.ok(merged?.source.includes("Photon"));
-  assert.ok(merged?.source.includes("种子库"));
-  assert.ok(merged?.openingHours, "营业时间应由种子库补齐");
+  // 第二轮：不允许再有内置种子库兜底 —— 查不到就是查不到
+  assert.ok(!merged?.source.includes("种子库"), "source 不应再出现种子库：" + merged?.source);
+  assert.equal(merged?.openingHours, undefined, "没有真实来源就不该凭空补出营业时间");
+  assert.equal(merged?.ticketRange, undefined, "没有真实来源就不该凭空补出票价");
   assert.equal(merged?.verified, false);
-  assert.equal(merged?.ticketRange?.currency, "CNY");
+});
+
+test("search_places：所有源都取不到时如实返回 unavailable", async () => {
+  const http = fakeHttp(() => null);
+  const data = new TravelData(http);
+  const res = await data.searchPlaces("完全查不到的点", "火星");
+  assert.equal(res.availability, "unavailable");
+  assert.equal(res.data, null);
+  assert.match(res.error ?? "", /没有可用 POI 数据源/);
 });
 
 test("weather：解析逐日预报并映射天气文本", async () => {
@@ -163,13 +172,15 @@ test("countryFacts：RestCountries 命中", async () => {
   assert.equal(res.provenance.confidence, "high");
 });
 
-test("countryFacts：在线源失败时回退内置离线表", async () => {
+test("countryFacts：在线源失败时回退内置事实表并如实标注来源", async () => {
   const http = fakeHttp(() => null);
   const data = new TravelData(http);
   const res = await data.countryFacts("日本");
   assert.equal(res.availability, "degraded");
   assert.equal(res.data?.code, "JPN");
   assert.equal(res.data?.currencies[0], "JPY");
+  assert.equal(res.data?.source, "内置事实表（非 API）");
+  assert.equal(res.provenance.source, "内置事实表（非 API）");
 });
 
 test("haversine：北京到上海量级正确", () => {

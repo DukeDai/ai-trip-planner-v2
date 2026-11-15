@@ -144,12 +144,14 @@ async function healthPayload(): Promise<unknown> {
       provider: config.llm.provider,
       model: config.llm.model,
       baseURL: config.llm.baseURL,
-      keySource: config.llm.keySource
+      keySource: config.llm.keySource,
+      toolSearch: config.llm.toolSearch
     },
     dataSources: [
       ...dataSources,
-      { name: "amap", status: config.amapKey ? "up" : "off", note: config.amapKey ? "已配置 Key" : "未配置 AMAP_KEY（可选）：POI 走 Wikidata/OSM/种子库" },
-      { name: "offline-seed", status: "up", note: "内置离线种子库始终可用" }
+      { name: "amap", status: config.amapKey ? "up" : "off", note: config.amapKey ? "已配置 Key" : "未配置 AMAP_KEY（可选）：POI 走 Wikidata/OSM" },
+      { name: "wikidata", status: "up", note: "POI 结构化事实主源" },
+      { name: "offline-facts", status: "up", note: "内置事实表（非 API）：仅国家元数据，POI 不用" }
     ]
   };
   healthCache = { at: Date.now(), payload };
@@ -177,6 +179,7 @@ const server = http.createServer(async (req, res) => {
       }
       const trip = trips.create({
         title: body.title ? String(body.title) : undefined,
+        origin: body.origin ? String(body.origin) : undefined,
         destination,
         startDate,
         endDate,

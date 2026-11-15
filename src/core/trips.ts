@@ -6,6 +6,8 @@ import type { TripRepository } from "./persist.ts";
 
 export interface CreateTripInput {
   title?: string;
+  /** 出发城市（跨城行程必填） */
+  origin?: string;
   destination: string;
   startDate: string;
   endDate: string;
@@ -52,6 +54,7 @@ export class TripStore {
     const meta: TripMeta = {
       id,
       title: input.title?.trim() || input.destination + " " + input.startDate + "→" + input.endDate,
+      origin: input.origin?.trim() || undefined,
       destination: input.destination,
       startDate: input.startDate,
       endDate: input.endDate,
@@ -253,6 +256,7 @@ export function buildProfileMarkdown(meta: TripMeta, extra?: string): string {
   const lines = [
     "# 出行人画像（本次行程）",
     "",
+    "- 出发城市：" + (meta.origin ?? "（未提供，按目的地本地游处理）"),
     "- 目的地：" + meta.destination,
     "- 日期：" + meta.startDate + " → " + meta.endDate,
     "- 人数：" + meta.travelers + " 人",

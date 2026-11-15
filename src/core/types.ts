@@ -90,6 +90,15 @@ export interface ItineraryActivity {
   needsBooking: boolean;
   bookingLeadDays?: number;
   verified: boolean;
+  /** 所在城市（城市名，如「上海」/「京都」）—— 第二轮：城市轨迹校验的锚点 */
+  city?: string;
+  /** 坐标 —— 第二轮：相邻点位地理连贯性校验 */
+  lat?: number;
+  lon?: number;
+  /** 仅 transport 类：跨城移动的起点城市 */
+  fromCity?: string;
+  /** 仅 transport 类：跨城移动的终点城市 */
+  toCity?: string;
 }
 
 export interface ItineraryDay {
@@ -108,8 +117,27 @@ export interface BudgetLine {
   confidence: Confidence;
 }
 
+/** 跨城/远距离决策的本地替代对比 —— 第二轮硬规则 */
+export interface ItineraryAlternative {
+  decision: string;
+  fromCity: string;
+  toCity: string;
+  chosen: string;
+  localAlternative: string;
+  chosenCost: number;
+  localCost: number;
+  costDelta: number;
+  chosenTime: string;
+  localTime: string;
+  experienceGain: string;
+  recommendation: "keep" | "downgrade" | "switch";
+  rationale: string;
+}
+
 export interface ItineraryPlan {
   tripId: string;
+  /** 出发城市 —— 第二轮：城市轨迹校验的起点 */
+  origin?: string;
   destination: string;
   startDate: string;
   endDate: string;
@@ -123,11 +151,15 @@ export interface ItineraryPlan {
   };
   risks: { level: "high" | "medium" | "low"; title: string; mitigation: string }[];
   unconfirmed: { item: string; reason: string; howToVerify: string }[];
+  /** 跨城决策的本地替代对比（出现跨城时必填） */
+  alternatives?: ItineraryAlternative[];
 }
 
 export interface TripMeta {
   id: string;
   title: string;
+  /** 出发城市 —— 第二轮：跨城行程的城市轨迹起点 */
+  origin?: string;
   destination: string;
   startDate: string;
   endDate: string;

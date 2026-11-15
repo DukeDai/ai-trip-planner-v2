@@ -161,7 +161,7 @@ test("本地优先：地点库命中时不请求外部源", async () => {
   });
   const { data, state } = fakeData();
   const tools = createTools({ data, workspace, repo, tripId: "t1" });
-  const out = JSON.parse(String(await toolByName(tools, "search_places").invoke({ query: "故宫", city: "北京" })));
+  const out = JSON.parse(String(await toolByName(tools, "search_sights").invoke({ query: "故宫", city: "北京" })));
   assert.equal(state.searchCalls, 0, "本地命中不应请求外部源");
   assert.equal(out.availability, "ok");
   assert.equal(out.data[0].name, "故宫博物院");
@@ -193,7 +193,7 @@ test("取数即落库：外部成功后写快照与地点索引", async () => {
     }
   } as unknown as TravelData;
   const tools = createTools({ data: okData, workspace, repo, tripId: "t1" });
-  const out = JSON.parse(String(await toolByName(tools, "search_places").invoke({ query: "某景点" })));
+  const out = JSON.parse(String(await toolByName(tools, "search_sights").invoke({ query: "某景点" })));
   assert.equal(out.ok, true);
   assert.equal(calls.upsertPlaces, 1, "应写入地点索引");
   assert.equal(calls.saveSnapshot, 1, "应写入取数快照");
@@ -202,8 +202,8 @@ test("取数即落库：外部成功后写快照与地点索引", async () => {
 test("断源兜底：外部不可用且有存档时返回存档并标注", async () => {
   const { repo } = fakeRepo({
     snapshot: {
-      tool: "get_weather",
-      queryKey: "get_weather|39.9,116.4|2026-11-20,2026-11-22",
+      tool: "get_daily_weather",
+      queryKey: "get_daily_weather|39.9,116.4|2026-11-20,2026-11-22",
       provider: "open-meteo",
       fetchedAt: new Date().toISOString(),
       confidence: "high",
@@ -215,7 +215,7 @@ test("断源兜底：外部不可用且有存档时返回存档并标注", async
   const tools = createTools({ data, workspace, repo, tripId: "t1" });
   const out = JSON.parse(
     String(
-      await toolByName(tools, "get_weather").invoke({
+      await toolByName(tools, "get_daily_weather").invoke({
         latitude: 39.9,
         longitude: 116.4,
         startDate: "2026-11-20",
@@ -236,7 +236,7 @@ test("断源且无存档：如实返回 unavailable，不编数据", async () =>
   const tools = createTools({ data, workspace, repo, tripId: "t1" });
   const out = JSON.parse(
     String(
-      await toolByName(tools, "get_weather").invoke({
+      await toolByName(tools, "get_daily_weather").invoke({
         latitude: 1,
         longitude: 2,
         startDate: "2026-11-20",
@@ -253,7 +253,7 @@ test("无仓储（纯内存模式）时行为不变，不会崩", async () => {
   const tools = createTools({ data, workspace, repo: null, tripId: null });
   const out = JSON.parse(
     String(
-      await toolByName(tools, "get_weather").invoke({
+      await toolByName(tools, "get_daily_weather").invoke({
         latitude: 1,
         longitude: 2,
         startDate: "2026-11-20",

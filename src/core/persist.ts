@@ -86,7 +86,7 @@ export class TripRepository {
       meta.currency,
       JSON.stringify(meta.preferences),
       meta.status,
-      JSON.stringify({}),
+      JSON.stringify({ origin: meta.origin ?? null }),
       meta.createdAt,
       meta.updatedAt
     ]);
@@ -304,9 +304,19 @@ export class TripRepository {
 }
 
 function rowToTrip(row: Record<string, unknown>): TripMeta {
+  let origin: string | undefined;
+  try {
+    const meta = typeof row.meta === "string" ? JSON.parse(row.meta) : (row.meta ?? {});
+    if (meta && typeof meta === "object" && typeof meta.origin === "string" && meta.origin.trim()) {
+      origin = meta.origin.trim();
+    }
+  } catch {
+    origin = undefined;
+  }
   return {
     id: String(row.id),
     title: String(row.title),
+    origin,
     destination: String(row.destination),
     startDate: String(row.start_date).slice(0, 10),
     endDate: String(row.end_date).slice(0, 10),
@@ -348,8 +358,6 @@ export function placeIdOf(candidate: PlaceCandidate): string {
     ? "wd"
     : src.includes("高德")
     ? "amap"
-    : src.includes("种子库")
-    ? "seed"
     : src.includes("Nominatim")
     ? "nom"
     : src.includes("Photon")

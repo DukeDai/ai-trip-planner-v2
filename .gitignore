@@ -1,0 +1,49 @@
+# ---- 依赖 ----
+node_modules/
+.npm-cache/
+.pnpm-store/
+.yarn/cache/
+.yarn/install-state.gz
+
+# ---- 运行时产物与本地数据 ----
+# data/cache  = 外部数据源磁盘缓存（可重建）
+# data/trips  = 用户行程与产物（含个人偏好，隐私不入库）
+data/cache/*
+data/trips/*
+!data/cache/.gitkeep
+!data/trips/.gitkeep
+
+# ---- 密钥与环境变量 ----
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# ---- 构建产物 ----
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# ---- 日志与临时文件 ----
+*.log
+tmp/
+.temp/
+.cache/
+
+# ---- 编辑器 / IDE ----
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ---- 操作系统 ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- 本地杂项（不纳入版本控制）----
+/trippilot-src.zip
+/.marker_probe
+/,e.code||e.message)}}

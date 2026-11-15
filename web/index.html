@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>TripPilot · AI 行程规划工作台</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232dd4bf'/%3E%3Ctext x='16' y='23' font-size='18' text-anchor='middle' fill='%230d1117' font-family='monospace' font-weight='bold'%3ET%3C/text%3E%3C/svg%3E" />
+<link rel="stylesheet" href="./styles.css" />
+</head>
+<body data-pane="chat">
+
+<div class="app">
+
+  <!-- ===================== 顶栏 ===================== -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">T</span>
+      <span class="brand-name">TripPilot</span>
+      <span class="brand-sub">AI 行程规划工作台</span>
+    </div>
+
+    <div class="topbar-right">
+      <label class="inline-field">
+        <span class="inline-label">行程</span>
+        <select id="trip-select" class="select" aria-label="选择行程"></select>
+      </label>
+
+      <span id="budget-badge" class="badge badge-muted" title="预算概览">预算 —</span>
+
+      <details class="health" id="health-details">
+        <summary id="health-badge" class="badge badge-muted" title="数据源状态">数据源 检查中…</summary>
+        <div class="health-pop">
+          <div id="health-llm" class="health-llm muted">模型信息加载中…</div>
+          <ul id="health-list" class="health-list"></ul>
+        </div>
+      </details>
+
+      <button id="btn-new-trip" class="btn btn-primary" type="button">＋ 新建行程</button>
+    </div>
+  </header>
+
+  <!-- ===================== 窄屏标签切换 ===================== -->
+  <nav class="mobile-tabs" id="mobile-tabs" role="tablist" aria-label="面板切换">
+    <button type="button" class="tab is-active" data-pane="chat" role="tab">对话</button>
+    <button type="button" class="tab" data-pane="board" role="tab">看板</button>
+    <button type="button" class="tab" data-pane="budget" role="tab">预算 / 产物</button>
+  </nav>
+
+  <!-- ===================== 三栏工作区 ===================== -->
+  <main class="workspace">
+
+    <!-- ---------- 左：对话流 ---------- -->
+    <section class="col col-chat" data-col="chat" aria-label="对话流">
+      <div class="col-head">
+        <h2 class="col-title">对话流</h2>
+        <span class="col-sub" id="chat-status">就绪</span>
+      </div>
+
+      <div class="chat-scroll" id="chat-stream">
+        <div class="empty-state" id="chat-empty">
+          <div class="empty-title">还没有开始规划</div>
+          <p class="empty-text">
+            点击右上角「新建行程」填写目的地、日期、人数与预算，然后在这里用一句话描述需求
+            （例如「想去京都看红叶，节奏慢一点，别排太满」）。
+          </p>
+          <p class="empty-text muted">
+            对话过程中，任务进度、工具调用、子代理委派与模型输出会实时显示在本栏；行程方案成型后会出现在中栏。
+          </p>
+        </div>
+      </div>
+
+      <form class="composer" id="composer" autocomplete="off">
+        <textarea id="composer-input" rows="2"
+          placeholder="描述你的行程需求，或对当前方案提出修改…（Enter 发送，Shift+Enter 换行）"></textarea>
+        <button id="composer-send" class="btn btn-primary" type="submit">发送</button>
+      </form>
+    </section>
+
+    <!-- ---------- 中：行程看板 ---------- -->
+    <section class="col col-board" data-col="board" aria-label="行程看板">
+      <div class="col-head">
+        <h2 class="col-title">行程看板</h2>
+        <span class="col-sub" id="board-sub">尚未加载行程</span>
+      </div>
+      <div class="board-scroll" id="board">
+        <div class="empty-state" id="board-empty">
+          <div class="empty-title">暂无行程方案</div>
+          <p class="empty-text">选择行程并开始规划后，方案会在这里按天呈现：日期、主题、逐条活动与费用。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- 右：预算 & 产物 ---------- -->
+    <aside class="col col-side" data-col="budget" aria-label="预算与产物">
+      <div class="col-head">
+        <h2 class="col-title">预算 &amp; 产物</h2>
+        <span class="col-sub" id="side-sub">—</span>
+      </div>
+      <div class="side-scroll" id="side">
+
+        <section class="panel" id="budget-panel">
+          <h3 class="panel-title">预算</h3>
+          <div id="budget-body"></div>
+        </section>
+
+        <section class="panel" id="files-panel">
+          <h3 class="panel-title">
+            产物文件
+            <button id="btn-download-all" class="btn btn-tiny" type="button" hidden>全部下载</button>
+          </h3>
+          <div id="files-body"></div>
+        </section>
+
+        <section class="panel" id="risk-panel">
+          <h3 class="panel-title">风险与待核实</h3>
+          <div id="risk-body"></div>
+        </section>
+
+      </div>
+    </aside>
+
+  </main>
+</div>
+
+<!-- ===================== 新建行程弹窗 ===================== -->
+<dialog id="trip-dialog" class="dialog">
+  <form id="trip-form" class="form" novalidate>
+    <h2 class="dialog-title">新建行程</h2>
+
+    <div class="form-grid">
+      <label class="form-field form-field-wide">
+        <span class="form-label">目的地 <em>*</em></span>
+        <input type="text" name="destination" required placeholder="例如：京都" />
+      </label>
+      <label class="form-field form-field-wide">
+        <span class="form-label">行程标题（可选）</span>
+        <input type="text" name="title" placeholder="留空则由系统按目的地生成" />
+      </label>
+      <label class="form-field">
+        <span class="form-label">开始日期 <em>*</em></span>
+        <input type="date" name="startDate" required />
+      </label>
+      <label class="form-field">
+        <span class="form-label">结束日期 <em>*</em></span>
+        <input type="date" name="endDate" required />
+      </label>
+      <label class="form-field">
+        <span class="form-label">人数 <em>*</em></span>
+        <input type="number" name="travelers" min="1" max="20" step="1" value="2" required />
+      </label>
+      <label class="form-field">
+        <span class="form-label">总预算 <em>*</em></span>
+        <input type="number" name="budgetTotal" min="0" step="100" value="10000" required />
+      </label>
+    </div>
+
+    <fieldset class="form-field form-field-wide">
+      <legend class="form-label">偏好（可多选）</legend>
+      <div class="pref-grid" id="pref-grid"></div>
+    </fieldset>
+
+    <p class="form-error" id="trip-form-error" hidden></p>
+
+    <div class="dialog-actions">
+      <button type="button" class="btn" id="trip-cancel">取消</button>
+      <button type="submit" class="btn btn-primary" id="trip-submit">创建行程</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ===================== 文件预览弹窗 ===================== -->
+<dialog id="file-dialog" class="dialog dialog-wide">
+  <div class="file-head">
+    <h2 class="dialog-title" id="file-name">文件</h2>
+    <a class="btn btn-tiny" id="file-download" download>下载</a>
+  </div>
+  <pre class="file-content" id="file-content"></pre>
+  <div class="dialog-actions">
+    <button type="button" class="btn" id="file-close">关闭</button>
+  </div>
+</dialog>
+
+<div id="toast-host" class="toast-host" aria-live="polite"></div>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>

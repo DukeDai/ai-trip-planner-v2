@@ -1,4 +1,6 @@
 import { loadConfig } from "../src/config.ts";
+import { connectDb } from "../src/core/db.ts";
+import { TripRepository } from "../src/core/persist.ts";
 import { HttpClient } from "../src/core/http.ts";
 import { TripStore, buildProfileMarkdown } from "../src/core/trips.ts";
 import { TravelData } from "../src/data/providers.ts";
@@ -10,7 +12,14 @@ import path from "node:path";
 const config = loadConfig();
 fs.mkdirSync(config.tripsDir, { recursive: true });
 fs.mkdirSync(config.cacheDir, { recursive: true });
-const trips = new TripStore(config.tripsDir);
+
+let db: Awaited<ReturnType<typeof connectDb>> | null = null;
+if (config.pg.url) {
+  db = await connectDb({ url: config.pg.url, schema: config.pg.schema });
+  console.log("[e2e] PG 已连接:", db.schema);
+}
+const repo = new TripRepository(db);
+const trips = new TripStore(config.tripsDir, repo);
 const data = new TravelData(new HttpClient({ cacheDir: config.cacheDir }), { amapKey: config.amapKey });
 
 const trip = trips.create({
@@ -23,9 +32,17 @@ const trip = trips.create({
   preferences: ["历史", "美食"]
 });
 trips.writeProfile(trip.id, buildProfileMarkdown(trip));
+await trips.persistTrip(trip);
 fs.cpSync(path.join(process.cwd(), "src/agent/skills"), path.join(trips.dir(trip.id), "skills"), { recursive: true });
 
-const ctx = { config, trips, data, checkpointer: new MemorySaver(), store: new InMemoryStore() };
+const ctx = {
+  config,
+  trips,
+  data,
+  checkpointer: db ? db.saver : new MemorySaver(),
+  store: db ? db.store : new InMemoryStore(),
+  repo
+};
 const brief =
   "帮我规划这趟北京行程。信息已经给全，别再追问：2026-11-20 到 2026-11-22 共 3 天，2 人，" +
   "总预算 8000 元（已含住宿，不含大交通），从北京出发（住市区，不含机票），" +

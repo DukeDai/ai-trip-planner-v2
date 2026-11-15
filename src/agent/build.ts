@@ -7,6 +7,7 @@ import type { AppConfig } from "../config.ts";
 import type { TripMeta } from "../core/types.ts";
 import type { TripWorkspace } from "../core/trips.ts";
 import type { TravelData } from "../data/providers.ts";
+import type { TripRepository } from "../core/persist.ts";
 import { MAIN_SYSTEM_PROMPT, SUBAGENTS } from "./prompts.ts";
 import { createTools } from "./tools.ts";
 
@@ -68,6 +69,8 @@ export interface BuildAgentOptions {
   data: TravelData;
   checkpointer: BaseCheckpointSaver;
   store?: BaseStore;
+  /** 外部取数落库仓储 */
+  repo?: TripRepository | null;
   onApproved?: (summary: string) => void;
 }
 
@@ -78,6 +81,8 @@ export function buildTripAgent(opts: BuildAgentOptions) {
   const tools = createTools({
     data: opts.data,
     workspace: opts.workspace,
+    repo: opts.repo ?? null,
+    tripId: opts.trip.id,
     onApproved: opts.onApproved
   });
 

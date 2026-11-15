@@ -577,7 +577,9 @@ button, input, select, textarea {
 
 /* ============================== 中：看板 ============================== */
 
-.board-scroll { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+/* 用块级流而不是 flex 列：flex 子项会被压缩，行程卡会被压成细线 */
+.board-scroll { padding: 14px; display: block; }
+.board-scroll > * + * { margin-top: 12px; }
 
 .day-card {
   border: 1px solid var(--line);

@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { ItineraryPlan, TripMeta } from "./types.ts";
+import type { TripRepository } from "./persist.ts";
 
 export interface CreateTripInput {
   title?: string;
@@ -31,9 +32,11 @@ export interface ArtifactInfo {
 
 export class TripStore {
   readonly root: string;
+  readonly repo: TripRepository | null;
 
-  constructor(root: string) {
+  constructor(root: string, repo?: TripRepository | null) {
     this.root = root;
+    this.repo = repo ?? null;
     fs.mkdirSync(this.root, { recursive: true });
   }
 
@@ -64,7 +67,29 @@ export class TripStore {
     return meta;
   }
 
+  /**
+   * 把行程元数据写入 PG。必须在任何关联数据（快照/产物）入库之前调用，
+   * 否则外键会失败 —— 这就是「有序落库」的顺序点。
+   */
+  async persistTrip(meta: TripMeta): Promise<void> {
+    await this.repo?.upsertTrip(meta);
+  }
+
   list(): TripMeta[] {
+    return this.listFromDisk();
+  }
+
+  /** 磁盘 + PG 合并后的行程列表（供 API 使用） */
+  async listAsync(): Promise<TripMeta[]> {
+    const disk = this.listFromDisk();
+    const pg = (await this.repo?.listTrips()) ?? [];
+    const map = new Map<string, TripMeta>();
+    for (const x of disk) map.set(x.id, x);
+    for (const x of pg) if (!map.has(x.id)) map.set(x.id, x);
+    return [...map.values()].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+  }
+
+  private listFromDisk(): TripMeta[] {
     let ids: string[] = [];
     try {
       ids = fs.readdirSync(this.root).filter((d) => {
@@ -75,13 +100,12 @@ export class TripStore {
         }
       });
     } catch {
-      return [];
+      ids = [];
     }
-    const trips = ids
+    return ids
       .map((id) => this.get(id))
       .filter((t): t is TripMeta => t !== null)
       .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
-    return trips;
   }
 
   get(id: string): TripMeta | null {
@@ -93,11 +117,20 @@ export class TripStore {
     }
   }
 
+  /** 磁盘优先，缺失时回落到 PG（进程重启 / 目录被清理后的恢复路径） */
+  async getAsync(id: string): Promise<TripMeta | null> {
+    const disk = this.get(id);
+    if (disk) return disk;
+    const fromPg = await this.repo?.getTrip(id);
+    return fromPg ?? null;
+  }
+
   update(id: string, patch: Partial<TripMeta>): TripMeta | null {
     const meta = this.get(id);
     if (!meta) return null;
     const next: TripMeta = { ...meta, ...patch, updatedAt: new Date().toISOString() };
     fs.writeFileSync(path.join(this.dir(id), "trip.json"), JSON.stringify(next, null, 2), "utf8");
+    void this.repo?.upsertTrip(next);
     return next;
   }
 
@@ -115,7 +148,9 @@ export class TripStore {
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, content, "utf8");
     const stat = fs.statSync(target);
-    return { name: rel.replace(/^\/+/, ""), bytes: stat.size, updatedAt: stat.mtime.toISOString() };
+    const name = rel.replace(/^\/+/, "");
+    void this.repo?.saveArtifact(id, name, content);
+    return { name, bytes: stat.size, updatedAt: stat.mtime.toISOString() };
   }
 
   readArtifact(id: string, rel: string): string | null {
@@ -177,6 +212,22 @@ export class TripStore {
 
   writeProfile(id: string, markdown: string): void {
     this.writeArtifact(id, "AGENTS.md", markdown);
+  }
+
+  /**
+   * 把 agent 直接写到工作区的文件同步进 PG。
+   * agent 用的是 FilesystemBackend（磁盘），落库由这一步兜住 —— 保证重启后产物不丢。
+   */
+  async syncArtifactsToRepo(id: string): Promise<number> {
+    if (!this.repo) return 0;
+    let count = 0;
+    for (const art of this.listArtifacts(id)) {
+      const content = this.readArtifact(id, art.name);
+      if (content === null) continue;
+      await this.repo.saveArtifact(id, art.name, content);
+      count++;
+    }
+    return count;
   }
 
   workspace(id: string): TripWorkspace {

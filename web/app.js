@@ -339,10 +339,14 @@ function updateBudgetBadge() {
   const planned = Number(plan.budget.planned) || 0;
   const delta = Number(plan.budget.delta) || 0;
   // 口径：delta = 实际合计 - 预算计划，> 0 为超支，< 0 为结余
-  badge.textContent = fmtMoney(total, cur) + ' · ' + (delta > 0 ? '超支' : delta < 0 ? '结余' : '预算内');
+  // 徽标展示的是「差额金额」，实际合计与计划放在 title 里
+  const label = delta > 0 ? '超支 ' + fmtMoney(Math.abs(delta), cur)
+    : delta < 0 ? '结余 ' + fmtMoney(Math.abs(delta), cur)
+    : '预算内';
+  badge.textContent = label;
   badge.className = 'badge ' + (delta > 0 ? 'badge-danger' : 'badge-ok');
-  badge.title = '实际 ' + fmtMoney(total, cur) + ' / 计划 ' + fmtMoney(planned, cur) +
-                '（' + (delta > 0 ? '超支 ' : delta < 0 ? '结余 ' : '持平 ') + fmtMoney(Math.abs(delta), cur) + '）';
+  badge.title = '实际合计 ' + fmtMoney(total, cur) + ' / 预算计划 ' + fmtMoney(planned, cur) +
+                '（' + label + '）';
 }
 
 /* -------- 中栏：看板 -------- */
@@ -366,7 +370,13 @@ function renderBoard() {
     return;
   }
 
-  const days = Array.isArray(plan.days) ? plan.days : [];
+  // 按 itinerary 的日期/序号排序，保证看板顺序与行程单一致
+  const days = (Array.isArray(plan.days) ? plan.days.slice() : []).sort(function (a, b) {
+    const da = String(a && a.date || '');
+    const db = String(b && b.date || '');
+    if (da !== db) return da < db ? -1 : 1;
+    return (Number(a && a.day) || 0) - (Number(b && b.day) || 0);
+  });
   dom.boardSub.textContent = (plan.destination || '') +
     (plan.startDate && plan.endDate ? ' · ' + plan.startDate + ' → ' + plan.endDate : '') +
     ' · ' + days.length + ' 天';
@@ -885,7 +895,7 @@ function renderInterruptEvent(ev, turn) {
     const b = ev.budget;
     const cur = b.currency || 'CNY';
     const delta = Number(b.delta) || 0;
-    const over = delta < 0;
+    const over = delta > 0;
     card.appendChild(el('div', { class: 'hitl-budget ' + (over ? 'is-over' : 'is-under') }, [
       el('span', { class: 'num', text: '计划 ' + fmtMoney(b.planned, cur) }),
       el('span', { class: 'num', text: '实际 ' + fmtMoney(b.total, cur) }),
@@ -910,7 +920,7 @@ function renderInterruptEvent(ev, turn) {
   card.appendChild(actions);
 
   const buttons = [approveBtn, rejectBtn, confirmBtn];
-  const resolve = function (approved, reason) { submitApproval(ev, card, actions, buttons, approved, reason); };
+  const resolve = function (approved, reason) { submitApproval(ev, card, actions, buttons, approved, reason, turn); };
 
   approveBtn.addEventListener('click', function () { resolve(true, undefined); });
   rejectBtn.addEventListener('click', function () {
@@ -933,7 +943,7 @@ function renderInterruptEvent(ev, turn) {
   scrollChat(true);
 }
 
-async function submitApproval(ev, card, actions, buttons, approved, reason) {
+async function submitApproval(ev, card, actions, buttons, approved, reason, turn) {
   if (!state.tripId) {
     toast('没有选中的行程，无法提交确认', 'error');
     return;
@@ -943,7 +953,21 @@ async function submitApproval(ev, card, actions, buttons, approved, reason) {
   try {
     const payload = { interruptId: ev.interruptId, approved: approved };
     if (!approved && reason) payload.reason = reason;
-    await jfetch(API.approve(state.tripId), { method: 'POST', body: JSON.stringify(payload) });
+    // 放行后端会继续跑 agent 并以 SSE 回传后续事件 —— 必须按流读，不能用普通 json 请求
+    const res = await fetch(API.approve(state.tripId), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      let message = '提交确认失败：HTTP ' + res.status;
+      try {
+        const body = await res.json();
+        if (body && body.error && body.error.message) message = body.error.message;
+      } catch (e) { /* 非 JSON 错误体 */ }
+      throw new Error(message);
+    }
+    if (!res.body) throw new Error('当前浏览器不支持流式响应，无法读取续跑事件。');
     card.classList.remove('is-resolving');
     card.classList.add(approved ? 'is-approved' : 'is-rejected');
     clear(actions);
@@ -951,6 +975,8 @@ async function submitApproval(ev, card, actions, buttons, approved, reason) {
       class: 'hitl-resolved',
       text: approved ? '✓ 已放行，正在继续生成…' : '✕ 已驳回：' + (reason || ''),
     }));
+    const streamTurn = turn || createTurn();
+    await readSse(res.body, streamTurn);
   } catch (e) {
     card.classList.remove('is-resolving');
     for (const btn of buttons) btn.disabled = false;
@@ -1124,12 +1150,15 @@ async function loadTrip(id, opts) {
   updateComposerState();
   try {
     const res = await jfetch(API.trip(id));
+    // 过期响应丢弃：请求期间用户可能已经切到别的行程
+    if (state.tripId !== id) return;
     state.trip = (res && res.trip) || null;
     if (res && res.plan) state.plan = res.plan;
     else if (!options.keepPlan) state.plan = null;
     state.files = Array.isArray(res && res.files) ? res.files : [];
     state.detailError = null;
   } catch (e) {
+    if (state.tripId !== id) return;
     state.detailError = e.message;
     if (!options.silent) appendError('加载行程失败：' + e.message);
   }
@@ -1144,8 +1173,11 @@ async function loadTrip(id, opts) {
 async function refreshTrip(opts) {
   const options = opts || {};
   if (!state.tripId) return;
+  const id = state.tripId;
   try {
-    const res = await jfetch(API.trip(state.tripId));
+    const res = await jfetch(API.trip(id));
+    // 同理：刷新期间行程被切换，这份响应已经过期
+    if (state.tripId !== id) return;
     if (res && res.trip) state.trip = res.trip;
     if (res && res.plan) state.plan = res.plan;
     else if (!options.keepPlan) state.plan = null;

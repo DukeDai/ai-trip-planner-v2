@@ -4,6 +4,7 @@ import type { AppConfig } from "../config.ts";
 import type { TripMeta } from "../core/types.ts";
 import type { TripStore } from "../core/trips.ts";
 import type { TravelData } from "../data/providers.ts";
+import type { TripRepository } from "../core/persist.ts";
 import { buildTripAgent } from "./build.ts";
 
 export interface AgentEvent {
@@ -17,6 +18,8 @@ export interface RunContext {
   data: TravelData;
   checkpointer: BaseCheckpointSaver;
   store?: BaseStore;
+  /** 外部取数落库仓储 */
+  repo?: TripRepository | null;
 }
 
 interface ToolCallInfo {
@@ -90,6 +93,28 @@ export interface InterruptInfo {
   args: Record<string, unknown>;
 }
 
+/**
+ * 从 checkpointer 里捞出该行程当前挂起的 HITL。
+ * 有了 PG 之后，挂起状态存在 checkpoint 里 —— 即使是另一个进程/另一次重启发起的规划，
+ * 这里也能认出来并继续（不再依赖进程内的 interrupts map）。
+ */
+export async function findTripInterrupt(ctx: RunContext, trip: TripMeta): Promise<InterruptInfo | null> {
+  const workspace = ctx.trips.workspace(trip.id);
+  const { agent } = buildTripAgent({
+    config: ctx.config,
+    trip,
+    workspace,
+    data: ctx.data,
+    checkpointer: ctx.checkpointer,
+    store: ctx.store,
+    repo: ctx.repo ?? null,
+    onApproved: () => {
+      ctx.trips.update(trip.id, { status: "approved" });
+    }
+  });
+  return findInterrupt(agent, trip.id);
+}
+
 export async function* streamTurn(
   ctx: RunContext,
   trip: TripMeta,
@@ -103,6 +128,7 @@ export async function* streamTurn(
     data: ctx.data,
     checkpointer: ctx.checkpointer,
     store: ctx.store,
+    repo: ctx.repo ?? null,
     onApproved: () => {
       ctx.trips.update(trip.id, { status: "approved" });
     }
@@ -232,6 +258,8 @@ export async function* streamTurn(
     return;
   }
 
+  // 产物同步入库：agent 用 write_file 写的是磁盘，这里兜住落库
+  await ctx.trips.syncArtifactsToRepo(trip.id);
   const plan = ctx.trips.readPlan(trip.id);
   yield { type: "done", plan };
 }
@@ -251,6 +279,7 @@ export async function* resumeTurn(
     data: ctx.data,
     checkpointer: ctx.checkpointer,
     store: ctx.store,
+    repo: ctx.repo ?? null,
     onApproved: () => {
       ctx.trips.update(trip.id, { status: "approved" });
     }
@@ -294,6 +323,7 @@ export async function* resumeTurn(
     };
     return;
   }
+  await ctx.trips.syncArtifactsToRepo(trip.id);
   const plan = ctx.trips.readPlan(trip.id);
   yield { type: "done", plan, approved };
 }

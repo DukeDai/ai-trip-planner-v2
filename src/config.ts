@@ -16,6 +16,13 @@ export interface LlmConfig {
   subagentModel?: string;
 }
 
+export interface PgConfig {
+  /** 连接串；为空则整体退化为纯内存模式 */
+  url: string;
+  /** 独立 schema 名，不与业务库既有表混在一起 */
+  schema: string;
+}
+
 export interface AppConfig {
   port: number;
   host: string;
@@ -24,6 +31,7 @@ export interface AppConfig {
   cacheDir: string;
   skillsDir: string;
   llm: LlmConfig;
+  pg: PgConfig;
   amapKey?: string;
   webSearchKey?: string;
 }
@@ -78,6 +86,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   }
 
   const dataDir = path.resolve(env.TRIP_DATA_DIR ?? "./data");
+  // TRIP_PG_URL 为空 => 纯内存模式（无 PG 也能跑）；否则用 PG 存 checkpoint/产物/取数快照
+  const pgUrl = env.TRIP_PG_URL?.trim() || "";
+  const pg: PgConfig = {
+    url: pgUrl,
+    schema: env.TRIP_PG_SCHEMA?.trim() || "trip_pilot"
+  };
   return {
     port: Number(env.TRIP_PORT ?? 8787),
     host: env.TRIP_HOST ?? "127.0.0.1",
@@ -94,6 +108,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       thinking: env.TRIP_LLM_THINKING === "enabled" ? "enabled" : "disabled",
       subagentModel: env.TRIP_LLM_SUBAGENT_MODEL?.trim() || undefined
     },
+    pg,
     amapKey: env.AMAP_KEY?.trim() || undefined,
     webSearchKey: env.TRIP_WEB_SEARCH_KEY?.trim() || undefined,
   };

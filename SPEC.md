@@ -172,6 +172,10 @@ SSE 事件类型：`status`、`todo`、`tool`、`subagent`、`token`、`artifact
 - **凭据**：只从 env / 本地 auth store 读，**绝不进日志、不进产物、不进 git**
 - **成本**：子代理并行；单次规划目标 ≤ 15 次模型调用
 - **超时**：单工具 ≤ 15s，带缓存（TTL 6h）、单 host 限流、连续失败熔断 60s
+- **持久化**：可选 PostgreSQL（`TRIP_PG_URL`），独立 schema `trip_pilot`。会话状态走 LangGraph
+  原生 checkpoint（deepagents 的 thread_id 即行程 id，与普通 LangGraph 完全一致）；
+  行程/产物/取数快照/地点库/路线缓存/偏好落自建表。不配则退回纯内存模式
+- **取数三段式**：本地优先 → 取到即落库 → 存档兜底（兜底时必须标注存档来源与取回时间，置信度下调）
 - **隐私**：产物落本地 `data/trips/`，本地 gitignore
 
 ## 13. 验收标准（可测）

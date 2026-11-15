@@ -4,10 +4,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { InMemoryStore, MemorySaver } from "@langchain/langgraph";
 import { loadConfig } from "../config.ts";
+import { connectDb, type Db } from "../core/db.ts";
+import { TripRepository } from "../core/persist.ts";
 import { HttpClient } from "../core/http.ts";
 import { TripStore, buildProfileMarkdown } from "../core/trips.ts";
 import { TravelData } from "../data/providers.ts";
-import { streamTurn, resumeTurn, type InterruptInfo, type RunContext } from "../agent/runner.ts";
+import { streamTurn, resumeTurn, findTripInterrupt, type InterruptInfo, type RunContext } from "../agent/runner.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(here, "../..");
@@ -18,14 +20,29 @@ const config = loadConfig();
 fs.mkdirSync(config.tripsDir, { recursive: true });
 fs.mkdirSync(config.cacheDir, { recursive: true });
 
-const trips = new TripStore(config.tripsDir);
+// ---- 持久化：有 TRIP_PG_URL 就用 PG（checkpoint / 产物 / 取数快照），否则退回内存 ----
+let db: Db | null = null;
+if (config.pg.url) {
+  try {
+    db = await connectDb({ url: config.pg.url, schema: config.pg.schema });
+    console.log("[TripPilot] PostgreSQL 已连接，schema =", db.schema);
+  } catch (err) {
+    console.warn("[TripPilot] PostgreSQL 连接失败，本次退回内存模式：", err instanceof Error ? err.message : err);
+    db = null;
+  }
+} else {
+  console.log("[TripPilot] 未配置 TRIP_PG_URL，使用内存模式（重启后不保留会话）");
+}
+const repo = new TripRepository(db);
+
+const trips = new TripStore(config.tripsDir, repo);
 const httpClient = new HttpClient({ cacheDir: config.cacheDir });
 const data = new TravelData(httpClient, { amapKey: config.amapKey });
-const checkpointer = new MemorySaver();
-const store = new InMemoryStore();
+const checkpointer = db ? db.saver : new MemorySaver();
+const store = db ? db.store : new InMemoryStore();
 const interrupts = new Map<string, InterruptInfo>();
 
-const runContext: RunContext = { config, trips, data, checkpointer, store };
+const runContext: RunContext = { config, trips, data, checkpointer, store, repo };
 
 /** 把技能目录复制进行程工作区（skills 通过后端相对路径加载） */
 function seedWorkspace(tripId: string): void {
@@ -169,19 +186,20 @@ const server = http.createServer(async (req, res) => {
         preferences: Array.isArray(body.preferences) ? body.preferences.map(String) : []
       });
       trips.writeProfile(trip.id, buildProfileMarkdown(trip));
+      await trips.persistTrip(trip);
       seedWorkspace(trip.id);
       json(res, 201, { trip });
       return;
     }
 
     if (pathname === "/api/trips" && req.method === "GET") {
-      json(res, 200, { trips: trips.list() });
+      json(res, 200, { trips: await trips.listAsync() });
       return;
     }
 
     const tripMatch = pathname.match(/^\/api\/trips\/([^/]+)$/);
     if (tripMatch && req.method === "GET") {
-      const trip = trips.get(tripMatch[1]);
+      const trip = await trips.getAsync(tripMatch[1]);
       if (!trip) {
         json(res, 404, { error: { code: "NOT_FOUND", message: "行程不存在" } });
         return;
@@ -208,7 +226,7 @@ const server = http.createServer(async (req, res) => {
 
     const chatMatch = pathname.match(/^\/api\/trips\/([^/]+)\/chat$/);
     if (chatMatch && req.method === "POST") {
-      const trip = trips.get(chatMatch[1]);
+      const trip = await trips.getAsync(chatMatch[1]);
       if (!trip) {
         json(res, 404, { error: { code: "NOT_FOUND", message: "行程不存在" } });
         return;
@@ -250,7 +268,7 @@ const server = http.createServer(async (req, res) => {
 
     const approveMatch = pathname.match(/^\/api\/trips\/([^/]+)\/approve$/);
     if (approveMatch && req.method === "POST") {
-      const trip = trips.get(approveMatch[1]);
+      const trip = await trips.getAsync(approveMatch[1]);
       if (!trip) {
         json(res, 404, { error: { code: "NOT_FOUND", message: "行程不存在" } });
         return;
@@ -258,7 +276,12 @@ const server = http.createServer(async (req, res) => {
       const body = await readJsonBody(req);
       const approved = body.approved === true;
       const reason = body.reason ? String(body.reason) : undefined;
-      const info = interrupts.get(trip.id);
+      let info = interrupts.get(trip.id);
+      if (!info) {
+        // 进程内没有记录时，从 checkpoint 里找挂起的中断（PG 模式下跨进程/跨重启可用）
+        info = (await findTripInterrupt(runContext, trip)) ?? undefined;
+        if (info) interrupts.set(trip.id, info);
+      }
       if (!info) {
         json(res, 409, { error: { code: "NO_PENDING_INTERRUPT", message: "当前没有待确认的动作" } });
         return;
@@ -307,6 +330,7 @@ server.listen(config.port, config.host, () => {
   console.log("[TripPilot] http://" + config.host + ":" + config.port);
   console.log("[TripPilot] 模型:", config.llm.provider + ":" + config.llm.model, "凭证来源:", config.llm.keySource);
   console.log("[TripPilot] 数据目录:", config.dataDir);
+  console.log("[TripPilot] 持久化:", db ? "PostgreSQL · " + db.schema : "内存");
   if (!config.llm.apiKey) {
     console.warn("[TripPilot] 警告：未找到模型凭证，请设置 TRIP_LLM_API_KEY");
   }

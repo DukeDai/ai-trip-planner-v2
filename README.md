@@ -57,6 +57,30 @@ test/                    # 27 个单测
 - 任何取不到的数据必须标 `verified: false` 并进 `unconfirmed`，**不允许编造**
 - 配 `AMAP_KEY` 后接入高德：营业时间/均价/评分/POI 覆盖显著增强
 
+## 三之二、PostgreSQL 持久化（强烈建议配）
+
+设 `TRIP_PG_URL` 后启用。数据全部落在**独立 schema**（默认 `trip_pilot`），不与业务库既有表混用：
+
+| 表 | 存什么 |
+|---|---|
+| `checkpoints` / `checkpoint_blobs` / `checkpoint_writes` | LangGraph 会话状态（deepagents 的 thread_id = 行程 id），重启不丢、HITL 可续跑 |
+| `store` | 长期记忆（跨行程的出行人偏好） |
+| `trips` | 行程元数据 |
+| `artifacts` | 产物文件（行程单/预算表/清单/调研记录），DB 里留一份可查询副本 |
+| `source_snapshots` | **每一次外部取数的快照**：来源 URL、抓取时间、置信度、原始结果 |
+| `place_index` | 地点库（跨行程复用的 POI 缓存，每行带 source/source_ref/置信度） |
+| `route_cache` | 路线缓存 |
+| `preferences` | 出行人长期偏好 |
+
+**取数三段式**（解决「实时查会 api fail」）：
+
+1. **本地优先** —— 命中 `place_index` / `route_cache` 直接用，不打外网；
+2. **取到即落库** —— 每次外部取数写 `source_snapshots`，附来源与抓取时间；
+3. **存档兜底** —— 外网挂掉时返回最近一次存档，`availability=degraded`，来源标注
+   「存档兜底 · 某源（N 分钟前取回）」，置信度下调为 low，并在 `error` 里说明实时源失败原因。
+
+不配 `TRIP_PG_URL` 时自动退回纯内存模式，其余功能不受影响。
+
 ## 四、模型配置
 
 默认走本机 MCode 网关（Anthropic 协议）：

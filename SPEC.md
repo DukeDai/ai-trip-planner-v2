@@ -200,6 +200,25 @@ SSE 事件类型：`status`、`todo`、`tool`、`subagent`、`token`、`artifact
 | 前端（内置浏览器实测） | 看板按天渲染、风险卡/预算分类/置信度徽标正常、产物 9 项可下载、预算口径正确显示「结余 ¥3,062」 |
 | 数据源健康 | open-meteo / osrm / restcountries / offline-seed 可用；photon 间歇不可达；amap 未配置（可选） |
 
+### 第二轮验证记录（2026-11-15 晚，PG + 前端修复）
+
+| 项 | 结果 |
+|---|---|
+| PG 自动建表 | 13 张：`checkpoints` `checkpoint_blobs` `checkpoint_writes` `checkpoint_migrations` `store` `store_migrations`（LangGraph 原生）+ `trips` `artifacts` `source_snapshots` `place_index` `route_cache` `preferences`（自建） |
+| E2E（北京 3 天 / PG checkpointer） | 739s，729 个 token 帧、**177 次工具调用**、4 子代理全完成、9 个产物、HITL 正常挂起；线程在 PG 里留下 **855 行 checkpoint** |
+| 取数三段式实测 | ① 断源 + 本地命中 → `ok`「本地地点库（已落库，未再请求外网）」；② 断源 + 无本地无存档 → `unavailable`（如实报错）；③ 断源 + 有存档 → `degraded`「存档兜底 · open-meteo（0 分钟前取回）」，置信度下调 low |
+| **跨进程放行** | 脚本进程把行程挂起在 HITL，**另一个进程（服务器）从 PG checkpoint 认出该挂起并放行** → 169 帧 SSE（168 token + 1 done）→ 行程状态 draft → **approved**，产物 10 个 |
+| 前端 4 项修复 | ① 放行后走 SSE 续跑（此前 jfetch 拿不到事件流，故"没下文"）；② 徽标改为显示结余/超支**金额**（实际合计与计划移入 title）；③ 看板改块级流 + days 按日期排序（此前 flex 列把行程卡压成细线、风险卡顶到最前）；④ 切换行程时的过期响应守卫 |
+| 单测 | **32 passed / 0 failed**（新增 5 例覆盖本地优先 / 取到即落库 / 存档兜底 / 无存档诚实失败 / 无仓储不崩） |
+
+**第二轮修掉的真缺陷**
+7. approve 端点返回 SSE，前端却用普通 JSON 请求读它 → 放行后"没下文"
+8. 预算差额符号在两处都写反（徽标与 HITL 卡片）
+9. `.board-scroll` 用 flex column，子项被压缩 → 行程卡变成细线、风险卡顶到最前
+10. 切换行程时旧请求后到，把已加载的方案清成 null（加过期响应守卫）
+11. 快照外键依赖行程行，而行程入库是"异步即发" → 竞态下 FK 失败（改为有序落库 + 失败降级）
+12. HITL 待确认动作只存在进程内 map → 换进程/重启就找不到（改为从 checkpoint 恢复）
+
 **本次修掉的真缺陷（均为实测暴露）**
 1. `FilesystemBackend` 未开 `virtualMode` → agent 的 `ls("/")` 能看到整机根目录
 2. `messages` 流模式载荷是 `[message, metadata]` 元组，当成对象读会丢掉全部 token

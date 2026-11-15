@@ -214,8 +214,14 @@ export async function* streamTurn(
               continue;
             }
             if (info?.name === "write_file") {
-              const path = String(info.args.path ?? info.args.file_path ?? "");
-              yield { type: "artifact", name: path.replace(/^\/+/, "") };
+              const path = String(
+                info.args.path ??
+                  info.args.file_path ??
+                  info.args.filePath ??
+                  info.args.filename ??
+                  ""
+              );
+              if (path) yield { type: "artifact", name: path.replace(/^\/+/, "") };
             }
             yield {
               type: "tool",

@@ -169,6 +169,14 @@ export class TripStore {
   listArtifacts(id: string): ArtifactInfo[] {
     const base = this.dir(id);
     const out: ArtifactInfo[] = [];
+    // SPEC §10 的交付物白名单：根目录只暴露文档化产物，research/ 只暴露调研 markdown
+    const ROOT_DELIVERABLES = new Set([
+      "itinerary.json",
+      "itinerary.md",
+      "budget.csv",
+      "packing.md",
+      "bookings.md"
+    ]);
     const walk = (dir: string, prefix: string) => {
       let entries: fs.Dirent[] = [];
       try {
@@ -180,7 +188,14 @@ export class TripStore {
         // 内部文件不作为交付物暴露：trip.json / 画像 / 技能目录 / 隐藏文件
         if (e.name === "trip.json" || e.name === "AGENTS.md") continue;
         if (e.name === "skills") continue;
+        // 事实包与审查报告是内部工作文件，不是交付物
+        if (e.name === "review" || e.name === "facts.json" || e.name === "report.json") continue;
         if (e.name.startsWith(".")) continue;
+        // 根目录：只认白名单（模型有时会写 build_*.py 之类的草稿脚本，不算交付物）
+        // 目录本身要放行，否则 research/ 整个进不来
+        if (prefix === "" && !e.isDirectory() && !ROOT_DELIVERABLES.has(e.name)) continue;
+        // research/ 等子目录里只认 markdown
+        if (prefix !== "" && !e.isDirectory() && !e.name.endsWith(".md")) continue;
         const full = path.join(dir, e.name);
         const rel = prefix ? prefix + "/" + e.name : e.name;
         if (e.isDirectory()) {

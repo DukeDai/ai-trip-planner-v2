@@ -90,7 +90,9 @@
 2. 连续失败 2 次即熔断 60s，直接返回「已熔断」而不是继续空等；
 3. 磁盘缓存 6h —— 同一批地点只打一次外网。
 
-命中多源且「名称相近 + 距离 250m 内」视为同一地点，**合并字段而不是丢弃**（例如 Wikidata 给坐标、种子库给票价与营业时间）。
+命中多源且「名称相近 + 距离 250m 内」视为同一地点，**合并字段而不是丢弃**（例如 Wikidata 给坐标、OSM 给英文名与标签、高德给营业时间与票价）。
+
+> 第二轮变更：内置 POI 种子库已删除，此处不再存在「种子库」这一数据来源；跨源合并只发生在**真实 API** 之间。
 
 置信度规则：`high`=官方/一手源；`medium`=聚合源；`low`=推断或估算；`unavailable`=取不到。
 
@@ -244,7 +246,7 @@ SSE 事件类型：`status`、`todo`、`tool`、`subagent`、`token`、`artifact
 | HITL | 挂起 → 放行耗时 **3.6s**，`approved.json` 落盘，行程状态 draft → **approved**；驳回会把理由作为 ToolMessage 回灌给 agent |
 | 真实数据 | Wikidata 命中故宫/天坛/慕田峪/埃菲尔铁塔；OSRM 故宫→798 = 14.2km / 15min；Open-Meteo 三日预报；RestCountries 不可用时回退内置表 |
 | 前端（内置浏览器实测） | 看板按天渲染、风险卡/预算分类/置信度徽标正常、产物 9 项可下载、预算口径正确显示「结余 ¥3,062」 |
-| 数据源健康 | open-meteo / osrm / restcountries / offline-seed 可用；photon 间歇不可达；amap 未配置（可选） |
+| 数据源健康 | open-meteo / osrm / restcountries / wikidata 可用；photon 间歇不可达；amap 未配置（可选） |
 
 ### 第二轮验证记录（2026-11-15 晚，PG + 前端修复）
 
@@ -269,7 +271,7 @@ SSE 事件类型：`status`、`todo`、`tool`、`subagent`、`token`、`artifact
 1. `FilesystemBackend` 未开 `virtualMode` → agent 的 `ls("/")` 能看到整机根目录
 2. `messages` 流模式载荷是 `[message, metadata]` 元组，当成对象读会丢掉全部 token
 3. HITL 续跑载荷写成了 `{[toolCallId]: decision}`，实际必须是 `{decisions: [...]}` 数组
-4. 同名同坐标的跨源条目被去重丢弃（Wikidata 坐标 + 种子库票价没有合并）
+4. 同名同坐标的跨源条目被去重丢弃（Wikidata 坐标 + 另一真实源的价格/开放时间没有合并）
 5. 预算差额符号口径相反：数据是 `delta = 实际 − 计划`（负数为结余），前端按 `delta < 0 = 超支` 渲染
 6. 产物列表把内部 `skills/` 与隐藏文件当成交付物暴露
 
@@ -361,8 +363,22 @@ SSE 事件类型：`status`、`todo`、`tool`、`subagent`、`token`、`artifact
 - `review_itinerary` 工具内部直接调用审查模型（独立模型实例，thinking 关闭），
   产出 `/review/report.json`；`submit_itinerary` 校验报告里的 `planHash` 是否等于当前
   `itinerary.json` 的哈希 —— 改稿后必须重新审查。
-- 审查最多 3 轮：第 4 轮仍未通过，`submit_itinerary` 直接拒绝并说明。
 - 有 `blocking` 问题 → 报告 `approved:false`，主代理必须改稿后重新 `review_itinerary`。
+- **轮次按「已审查过的不同版本数」计**（`reviewedHashes`），同一份行程重复送审不消耗轮次。
+- **同一份行程（planHash 未变）重复送审 → 直接复用上次的结论，不重跑审查模型**
+  （实测苏州 E2E 同一份内容被送了 18 次审查，每次都重跑模型，纯烧 token）。
+- **收敛兜底**：第 4 轮起若仍有 blocking，降级为 warning 并放行（approved=true），
+  但这些条目会写进 warnings 并要求主代理落进 `risks` / `unconfirmed` 供人工复核。
+  不这样做会陷入「改一轮→再审一轮」的死循环（实测出现过 15 轮仍不收敛）。
+- **审查轮次硬上限 = 6**（`MAX_REVIEW_ROUNDS`）：超过上限后 `review_itinerary` **不再调模型**，
+  直接给一个「已封顶」结论（approved=true + 说明条）让主代理收工。
+  为什么要封顶：审查一通过，主代理常常继续「打磨」（补时间、细标注），
+  每次改动都换 planHash → 又触发新一轮审查，于是无限打磨（实测京都打到第 17 轮仍在改稿）。
+- **审查通过后必须立刻 `submit_itinerary`**：提示词与工具返回都写明「一改行程就得重新审」。
+- **改稿次数预算 300**（`tool-guard.ts`）：一次运行内 `edit_file` / `write_file` 合计超过 300 次就挡住，
+  并明确指路「`submit_itinerary` → `finalize_itinerary`」。
+  这是打磨循环的硬兜底 —— 只截断改稿，不影响提交与定稿。
+- `submit_itinerary` 的门禁：报告存在 + `planHash` 与当前 `itinerary.json` 一致 + `approved=true`。
 
 **tool search**
 - `langchain@1.6` 只有 `providerToolSearchMiddleware`（仅 OpenAI gpt-5.4+ / Claude Sonnet 4+），
@@ -372,3 +388,130 @@ SSE 事件类型：`status`、`todo`、`tool`、`subagent`、`token`、`artifact
   模型也可主动 `tool_search` 精确装载。
 - 开关：`TRIP_TOOL_SEARCH=local|provider|none`，默认 `local`；
   `provider` 挂 `providerToolSearchMiddleware`（换 Claude/GPT-5.4+ 时才可用）。
+**工具防护与进程韧性（第二轮补修，真实 E2E 暴露）**
+
+2026-11-16 京都 E2E 跑到一半整个进程被杀掉，根因链：
+
+1. 模型给 deepagents 的 `grep` 传了含 **null 字节**的 pattern
+   （实测原串：`[\x00-\b\x0B\f\x0E-\x1F]`，字符码 `91,0,45,8,...`）。
+2. `FilesystemBackend.ripgrepSearch` 把 pattern 原样拼进 `spawn("rg", args)`，
+   Node 的 `child_process.spawn` **拒绝带 null 字节的参数** → `ERR_INVALID_ARG_VALUE`。
+3. deepagents 的 `createGrepTool` **没有 try/catch**，异常一路冒泡成未捕获的
+   Promise rejection；Node 20+ 默认把未捕获 rejection 升级为未捕获异常并**终止进程**。
+   → 一趟十几分钟的真实规划、checkpoint、SSE 进度全部作废。
+
+修复分三层（`src/agent/tool-guard.ts` + `src/core/process-guard.ts`）：
+
+| 层 | 做什么 | 挡住什么 |
+|---|---|---|
+| 参数净化 | 剥掉文件系统类工具参数里的控制字符；pattern 含控制字符直接判为无效调用并回一条「grep 是**字面量**搜索」的提示 | 根因（不进 `spawn`） |
+| 异常兜底 | `wrapToolCall` 里 try/catch，工具抛错一律转成 `status:"error"` 的 ToolMessage，模型能读到并自己改 | 异常逃逸 |
+| 进程安全网 | `process.on("unhandledRejection" / "uncaughtException")` 记日志后继续跑 | 整轮被打死 |
+
+另外两条相关修复：
+- **关闭 deepagents 自动注入的 `general-purpose` 子代理**（harness profile
+  `generalPurposeSubagent.enabled=false`）。它拥有主代理全部工具（含 grep/glob），
+  实测既容易挂死，也是本次事故的调用方；本项目用 4 个专职子代理就够。
+- **自定义 middleware 不会自动传给非 forked 子代理** —— 必须显式写进
+  `subagents[].middleware`，否则子代理里的同类问题照样打死进程。
+
+
+### 15.8 第二轮验证记录（2026-11-16 实测，真实 API + 真实模型 MiniMax-M3）
+
+**运行环境**：macOS / Node 24 / PG `trip_pilot` schema / `TRIP_TOOL_SEARCH=local`（默认）。
+数据源真实可达：open-meteo、osrm、wikidata、restcountries 可用；photon 时通时断（熔断生效）。
+
+#### 三个目的地（§15.5 验收标准 2）
+
+| 目的地 | 用时 / 工具调用 | 机器校验 | 天数 / 总额 / 预算 | 本地替代 | 审查 | 交付物 | 缺 source | 缺 city | verified=false 漏进 unconfirmed | 引用假数据 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 上海本地 1 晚 2 天 | 1634.0s / 603 | 通过 | 2 天 / 1930 / 3000（结余 1070） | 2 项 | approved，round 8，评分 91/82/87/78，0 blocking | 5 个齐备 | 0 | 0 | 0 | 0 |
+| 上海→苏州 3 天 2 晚 | 1032.6s / 599 | 通过 | 3 天 / 5130 / 6000（结余 870） | 5 项 | approved，round 8，评分 95/94/92/88，0 blocking | 5 个齐备 | 0 | 0 | 0 | 0 |
+| 上海→京都 3 天 2 晚 | 973.0s / 303 | 通过 | 3 天 / 17160 / 20000（结余 2840） | 4 项 | approved，round 4，评分 92/94/88/82，0 blocking | 5 个齐备 | 0 | 0 | 0 | 0 |
+
+产物清单：苏州与京都各 9 项、上海 10 项（多一份 `research/main-facts.md`），
+均为 `itinerary.json` / `itinerary.md` / `budget.csv` / `packing.md` / `bookings.md`
++ `research/*.md`，**三份产物中引用假数据均为 0 处**。
+
+> 上海那一行的 **1634.0s / 603 次工具调用**是「打磨循环」修复**之前**测出来的数值 ——
+> 那次跑暴露了「审查通过后无限改稿」的问题（改稿 250 次、审查 16 轮）。
+> 修复（结论缓存 + 轮次硬上限 6 + 改稿次数预算 300 + 封顶结论不再累积 warnings）
+> 见下方「修掉的真缺陷」第 4 条；修复后未再重跑上海场景，
+> 所以这里如实保留修复前的数值，不冒充修复后的成绩。
+> 上海场景那次 `research/transport.md` 里有 1 处「种子库」字样，是子代理在声明
+> 「未使用任何离线种子库」—— 属于**声明**不是**引用**，脚本判定为「仅提及」，不算失败。
+
+#### 反例：上海→京都（§15.5 验收标准 3）
+
+reviewer 把「上海→京都」当成一条**必须给本地替代对照**的跨城决策，给出：
+
+- **采用方案 7200 元 vs 上海本地替代 600 元，成本差 6600 元**
+- 结论 **keep**，理由：用户明确指定目的地为京都、偏好古寺与红叶，
+  上海本地方案（豫园 + 老街区）不构成同类体验的可比选项 —— 不是「等价省钱选项」。
+- 同时给出**降级替代**：不宿京都、3 天住大阪/关西机场周边，
+  省 400 元但通勤代价是每天 2 小时、砍掉 2-3 个古寺点位 → **downgrade**。
+
+苏州那条同样给出量化对照：**采用 5130 vs 上海本地 900，成本差 4230**，
+另有 4 条逐项降级建议（丝绸博物馆 / 苏州博物馆+忠王府 / 山塘街 / 返程跨城段）。
+
+> 结论：本地替代**强制产出**且**成本差量化**已落地；
+> 「去不去远地方」的最终判断由 reviewer 按用户偏好给出，并留给人复核。
+
+#### 数据诚实性（§15.5 验收标准 4）
+
+- 三个目的地合计 **0 条** activity 缺 source、**0 条**缺 city；
+  **0 条** `verified=false` 没进 `unconfirmed`。
+- 审查报告里最常见的 warning 正是「没有事实包证据」：
+  「餐饮数据源整体不可用」「铁路班次与票价未取得来源，800 元往返为占位」
+  「住宿未选定具体酒店，780 元/晚为规划占位」—— 这些都被如实标注，没有被包装成确定事实。
+- 国别元数据仍来自**内置事实表（非 API）**，来源标注为「内置事实表（非 API）」，
+  `/api/health` 里显示为 `offline-facts`，不与真实 API 源混淆。
+
+#### 跨进程放行（§15.5 验收标准 5 的一半）
+
+在 A 进程跑完规划并挂起 HITL，**另起 B 进程**（新 PID、新 HTTP 端口）：
+
+```
+POST /api/trips/trip-20261115-d0aa30/approve {"approved": true}
+→ SSE: agent 续跑、写出定稿
+→ approved.json 落盘、行程状态 draft → approved
+```
+
+恢复来源是 PG checkpoint（`checkpoints` / `checkpoint_blobs`），
+不依赖进程内存 —— 这条链路在 PG 模式下跨进程、跨重启都可用。
+
+#### 浏览器实测（§15.5 验收标准 5）
+
+内置浏览器实测 `http://127.0.0.1:8797`：
+
+- **看板**：标题显示「上海 → 苏州 · 2026-11-20 → 2026-11-22 · 3 天」（**出发城市**），
+  按 Day 1 / Day 2 顺序渲染，每条带日期与星期。
+- **条目**：时间、类型图标、耗时、总额 + 人均、来源（如「本地地点库 · Wikidata（坐标）；
+  本地路线缓存 · OSRM」）、置信度徽标（中置信 / 低置信）、**取数时间戳**、
+  「未取得来源（工具未返回）」如实标注、执行顺序与切换规则。
+- **本地替代对比**：5 项，每项含采用方案 / 本地替代 / 成本对比（¥5,130 vs ¥900，差 ¥4,230）/
+  耗时对比 / 体验增益 / 结论依据 + keep·downgrade·switch 徽标。
+- **预算**：实际合计 ¥5,130、预算计划 ¥6,000、**结余 ¥870**（口径 = 实际 − 计划，负数为结余）。
+- **产物区**：9 项，白名单干净（没有 facts.json / report.json / 草稿脚本 / skills/）。
+- **风险**：高/中/低分级 + 「⚠ 47 项待核实」。
+- **控制台**：0 error / 0 warn。
+
+#### 修掉的真缺陷（都是实测暴露，不是预防性改动）
+
+1. **含 null 字节的 grep 参数打死整轮规划** —— 详见 §15.7。修复后
+   `node scripts/verify-grep-crash.ts raw` 精确复现原报错
+   （`The argument 'args[3]' must be a string without null bytes`），
+   `guarded` 模式返回可读提示且不崩。
+2. **general-purpose 子代理**：自动注入的它拥有主代理全部工具，是 1 的调用方；
+   关闭后京都 E2E 只出现 4 个专职子代理。
+3. **自定义 middleware 不传给非 forked 子代理**：工具防护必须显式挂进 `subagents[].middleware`。
+4. **审查无限打磨**：同一份行程反复送审（苏州 E2E 实测 `review_itinerary` 调了 18 次，
+   京都一度打到第 17 轮还在改稿）→ 加结论缓存（同一 planHash 不重跑模型）+ 轮次硬上限 6 +
+   **改稿次数预算 300**（到顶后 `edit_file` 被挡并指路 submit → finalize）。
+   封顶结论必须基于「最后一次真审」重建，否则 warnings 会一轮轮累积
+   （实测出现过两条 `review/cap` 叠在一起）。
+5. **天气事实被压成空对象**（数组分支按 POI 字段映射）→ reviewer 误判天气是编的。
+6. **Photon 忽略城市参数**，把德国球场/纽约公园当上海 POI → 工具层加 60km 城市邻近度过滤，
+   过滤后为空则如实 `unavailable`。
+7. **子代理把检索降级脑补成「离线种子库」** → 4 个子代理提示词加禁止条款 + E2E 脚本自动扫描产物。
+8. **产物列表把内部文件当交付物暴露** → 白名单只放 5 个根目录交付物 + `research/*.md`。

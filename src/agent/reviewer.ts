@@ -69,10 +69,15 @@ export interface ReviewInput {
   planHash: string;
   round: number;
   facts: ReviewFact[];
+  /** 工作区已有文件（审查员据此核对产物完整性） */
+  artifactFiles?: string[];
   requirements: ReviewRequirements;
 }
 
 const BT = String.fromCharCode(96);
+
+/** 第几轮起启用收敛兜底 */
+const CONVERGE_ROUND = 4;
 
 const REVIEWER_SYSTEM_PROMPT = [
   "你是 TripPilot 的**行程审查员**（reviewer）。你不做规划，只做审查：读行程单 + 事实包，判断这份行程是否站得住。",
@@ -93,6 +98,10 @@ const REVIEWER_SYSTEM_PROMPT = [
   "C. **性价比**：跨城/远距离决策是否给出了本地替代对照（成本/耗时/体验）；跨城成本远高于本地替代且体验增益不明显时，必须给降级建议。",
   "D. **来源可信度**：每条 source 是否非空且来自事实包；verified=false 的条目是否进了 unconfirmed；有没有把「未确认」当确定事实写。",
   "",
+  "# 产物完整性（SPEC §10）",
+  "行程目录里必须有这五个文件：itinerary.json、itinerary.md、budget.csv、packing.md、bookings.md。",
+  "少了任何一个 → blocking，并明确指出缺哪个、该由谁写（写哪个文件）。",
+  "",
   "# 判定为 blocking（必须改）—— 只挑真正致命的，最多 8 条",
   "- B1 需求硬指标不满足（天数/人数/预算上限/用户明确要求的核心内容缺失）",
   "- B2 时间线或城市轨迹自相矛盾（落地前排目的地活动、时间倒退、跨城无交通条目、跨城起点不是当前所在城市）",
@@ -106,6 +115,13 @@ const REVIEWER_SYSTEM_PROMPT = [
   "- 事实包整体为空 —— 也是 warning（提示整体证据不足），**不要**因此判 blocking",
   "- 开放时间未确认、闭馆日可能冲突、票价时效风险、红叶季状态无依据、天气超出预报范围",
   "- 行程结构不完整（缺住宿/返程/某餐段）、每日点位过密或过疏",
+  "- 路线耗时的**量级**出入：只要与事实包同一量级（如事实 25 分钟、行程写 20 分钟），属 warning；" +
+    "只有方向性错误（写成步行 5 分钟、实际却是 2 小时车程；或路线方向相反）才 blocking",
+  "- 行程依赖某个**未落实的手段**（包车/拼车/包团/某班次）：如果行程已经明确标注它未确认、" +
+    "并且写出了可切换的备选（如「若包车不可行则改公共交通」），那就只是 warning；" +
+    "只有当行程把未落实的手段当成唯一排程基准、且没有任何备选时，才 blocking",
+  "- 同一个问题反复出现：如果你在上一轮已经提过它，而行程只是换了个说法，" +
+    "那就降级为 warning —— 不要让同一个问题无限打回",
   "- 描述性建议（哪个点更值得去、路线顺序可以更优）",
   "",
   "# 分寸",
@@ -254,6 +270,11 @@ function buildUserPrompt(input: ReviewInput): string {
       2
     ),
     "",
+    "# 工作区现有文件",
+    input.artifactFiles && input.artifactFiles.length > 0
+      ? input.artifactFiles.join("\n")
+      : "（空）",
+    "",
     "# 事实包（工具真实取到的数据，只有这些可以当证据）",
     input.facts.length > 0
       ? compactFacts(input.facts)
@@ -333,6 +354,35 @@ function normalizeReport(raw: unknown): { report: ReviewReport; problems: string
  * 跑一轮审查。模型输出解析失败时会再试一次；仍失败则给出 blocking 问题（不静默放行）。
  */
 export async function runReview(input: ReviewInput): Promise<ReviewReport> {
+  const report = await runReviewOnce(input);
+  return convergeIfNeeded(report, input.round);
+}
+
+/**
+ * 收敛兜底：第 4 轮起若仍未收敛，把剩余 blocking 降级为 warning 并放行。
+ * 不这样做就会陷入「改一轮→再审一轮」的死循环（实测出现过 15 轮仍不收敛）。
+ * 降级不是放过：这些条目会进 warnings，并要求主代理写进 risks / unconfirmed 供人工复核。
+ */
+export function convergeIfNeeded(report: ReviewReport, round: number): ReviewReport {
+  if (round < CONVERGE_ROUND || report.blocking.length === 0) return report;
+  const demoted = report.blocking.map((b) => ({
+    ...b,
+    severity: "warning" as const,
+    code: b.code + "/未收敛"
+  }));
+  return {
+    ...report,
+    approved: true,
+    summary:
+      report.summary +
+      " 【第 " + round + " 轮仍未收敛：按收敛规则把剩余 " + report.blocking.length +
+      " 条问题降级为 warning，主代理必须把它们写进 risks / unconfirmed 供人工复核】",
+    blocking: [],
+    warnings: [...report.warnings, ...demoted]
+  };
+}
+
+async function runReviewOnce(input: ReviewInput): Promise<ReviewReport> {
   const messages: { role: "system" | "user" | "assistant"; content: string }[] = [
     { role: "system", content: REVIEWER_SYSTEM_PROMPT },
     { role: "user", content: buildUserPrompt(input) }

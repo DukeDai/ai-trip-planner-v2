@@ -48,11 +48,13 @@ src/
 │   ├── reviewer.ts      # 审查员：只吃事实包 + 行程单，出结构化问题清单
 │   ├── tool-catalog.ts  # 细粒度工具目录（按数据域）
 │   ├── tool-search.ts   # 本地 tool search：元工具 + 按上下文裁剪工具列表
+│   ├── tool-guard.ts    # 工具防护：参数净化 + 兜住工具异常（防「一个坏参数打死整轮」）
 │   ├── runner.ts        # 流式事件归一化 + HITL 续跑
 │   └── skills/          # 4 份 SKILL.md 规范
+├── core/process-guard.ts# 进程安全网：未捕获异常记日志后继续跑
 ├── server/main.ts       # HTTP + SSE + 静态站点
 web/                     # 零构建前端（三栏工作台）
-test/                    # 45 个单测
+test/                    # 56 个单测
 ```
 
 ## 三、数据源与降级
@@ -100,7 +102,9 @@ test/                    # 45 个单测
 2. **LLM 审查**（`review_itinerary` → `src/agent/reviewer.ts`）：
    只吃**事实包**（`research/facts.json`，工具真取到的数据）+ 行程单，
    按需求匹配度 / 时间线与地理自洽 / 性价比 / 来源可信度四个维度出结构化问题清单；
-   报告带 `planHash`，**改稿后必须重新审查**；有 blocking 就打回，**最多 3 轮**。
+   报告带 `planHash`，**改稿后必须重新审查**；有 blocking 就打回。
+   轮次按「审过的不同版本数」计：第 4 轮起仍有 blocking 会降级为 warning 并放行（不放过，会落进
+   `risks` / `unconfirmed`），第 6 轮封顶不再调模型 —— 防止「审一轮→改一轮」无限打磨。
 3. **人工放行**（`finalize_itinerary` → HITL）：预算差额 + 定稿摘要等人确认。
 
 跨城决策的**本地替代**是硬要求：`alternatives` 里必须写清本地替代、成本差、耗时、体验增益与结论；
@@ -108,7 +112,7 @@ test/                    # 45 个单测
 
 ## 五、工具检索（本地 tool search）
 
-`langchain@1.6` 只有 `providerToolSearchMiddleware`，且**仅支持 OpenAI gpt-5.4+ / Claude Sonnet 4+`
+`langchain@1.6` 只有 `providerToolSearchMiddleware`，且**仅支持 OpenAI gpt-5.4+ / Claude Sonnet 4+**
 （当前模型 MiniMax-M3 调它会直接抛错），所以默认走本地实现：
 
 - 细粒度工具目录（`src/agent/tool-catalog.ts`）：按数据域组织（geo / poi:sight / poi:food / poi:stay /
@@ -119,6 +123,27 @@ test/                    # 45 个单测
 
 开关：`TRIP_TOOL_SEARCH=local|provider|none`，默认 `local`；
 `provider` 挂 provider 原生实现（换 Claude/GPT-5.4+ 时才可用）。
+
+## 五之二、工具防护（第二轮补修）
+
+deepagents 内置的 `grep` 把 pattern 原样拼进 `spawn("rg", args)`，
+而模型偶尔会生成含 **null 字节**的 pattern —— Node 拒绝这种参数，
+且 deepagents 的工具没有 try/catch，异常会冒泡成未捕获拒绝并**直接终止进程**，
+一趟十几分钟的规划连同 checkpoint 全部作废。
+
+现在有三层防护：
+
+- `src/agent/tool-guard.ts`：剥掉文件系统类工具参数里的控制字符；
+  pattern 含控制字符直接判为无效调用并提示「grep 是**字面量**搜索」；
+  工具抛错一律转成 `status:"error"` 的 ToolMessage，模型能读到并自己改。
+- `src/core/process-guard.ts`：`unhandledRejection` / `uncaughtException` 记日志后继续跑。
+- **改稿次数预算 300**：一次运行内 `edit_file` / `write_file` 超过 300 次就挡住，
+  并指路「`submit_itinerary` → `finalize_itinerary`」——
+  防止「审一轮→改一轮」无限打磨（实测上海 E2E 改稿 250 次、审查 16 轮，跑了 27 分钟）。
+- 关掉 deepagents 自动注入的 `general-purpose` 子代理（它拥有主代理全部工具，
+  既容易挂死也是本次事故的调用方），本项目只用 4 个专职子代理。
+
+复现脚本：`node scripts/verify-grep-crash.ts raw | guarded`。
 
 ## 六、模型配置
 
@@ -135,7 +160,8 @@ TRIP_LLM_MODEL=MiniMax-M3
 
 ## 七、HITL 流程
 
-1. agent 写 `/itinerary.json` → `review_itinerary` 审查（有 blocking 就改稿重审，≤3 轮）
+1. agent 写 `/itinerary.json` → `review_itinerary` 审查（有 blocking 就改稿重审；审查通过后**立刻提交**，
+   再改就得重新审 —— 提示词与工具返回都写死了这条）
 2. 审查通过 → `submit_itinerary` 机器校验（有问题会被打回重改）
 3. 校验通过 → `finalize_itinerary` → **挂起**，SSE 推 `interrupt` 事件
 4. 前端展示待确认卡片（摘要 + 预算差额）→ 用户放行或驳回并说明

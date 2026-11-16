@@ -14,6 +14,7 @@ export type ReviewerRunner = (input: {
   planHash: string;
   round: number;
   facts: ReviewFact[];
+  artifactFiles?: string[];
   requirements: ReviewRequirements;
 }) => Promise<ReviewReport>;
 
@@ -31,6 +32,16 @@ export interface ToolDeps {
   /** 需求摘要，供 reviewer 判断「需求匹配度」 */
   requirements?: ReviewRequirements;
 }
+
+/**
+ * 审查轮次硬上限。
+ *
+ * 为什么要封顶：审查通过后主代理常常继续「打磨」行程（补时间、细标注），
+ * 每次改动都会改变 planHash → 触发新一轮审查 → 于是陷入无限打磨。
+ * 实测京都 E2E 打到第 14 轮仍在改稿。
+ * 超过上限后不再调审查模型，直接给一个封顶结论让主代理收工。
+ */
+const MAX_REVIEW_ROUNDS = 6;
 
 function fmt(value: unknown): string {
   return JSON.stringify(value, null, 2);
@@ -192,6 +203,35 @@ export function createTools(deps: ToolDeps) {
     });
   };
 
+  /**
+   * 城市邻近度过滤。
+   * OSM 的名称检索**完全忽略城市参数** —— 查「上海 博物馆」会返回德国球场、
+   * 纽约公园大道这类境外 POI。给定了城市就必须按坐标把远方的假阳性剔掉。
+   * 返回 null 表示定位失败（此时不过滤，宁可多给也不误杀）。
+   */
+  const cityCenter = async (city: string | undefined): Promise<{ lat: number; lon: number } | null> => {
+    if (!city) return null;
+    const g = await deps.data.geocode(city);
+    recordFact("geocode_place", "geo", city, g);
+    const hit = g.ok && g.data && g.data[0];
+    if (!hit) return null;
+    return { lat: hit.lat, lon: hit.lon };
+  };
+
+  /** 保留离城市中心 60km 以内的候选；统计被剔除的远点 */
+  const filterByCity = <T extends { lat: number; lon: number }>(
+    items: T[],
+    center: { lat: number; lon: number } | null,
+    radiusKm = 60
+  ): { items: T[]; dropped: number } => {
+    if (!center || items.length === 0) return { items, dropped: 0 };
+    const kept = items.filter((p) => {
+      const meters = haversineMeters(center.lat, center.lon, p.lat, p.lon);
+      return meters <= radiusKm * 1000;
+    });
+    return { items: kept, dropped: items.length - kept.length };
+  };
+
   /** 检索 + 兜底检索词：某个词查不到就换同域的词再试 */
   const searchWithFallback = async (
     query: string,
@@ -271,11 +311,31 @@ export function createTools(deps: ToolDeps) {
         recordFact(opts.name, opts.kind, usedQuery + (city ? "@" + city : ""), res);
         if (res.ok && res.data) {
           const fetchedAt = res.provenance.fetchedAt;
-          await repo?.upsertPlaces(res.data.map((c) => toStoredPlace(c, fetchedAt)));
-          await saveSnapshot(opts.name, key, res, res.data);
+          // 城市邻近度过滤：OSM 名称检索不认城市参数，远方假阳性要剔掉
+          const center = await cityCenter(city);
+          const filtered = filterByCity(res.data, center);
+          await repo?.upsertPlaces(filtered.items.map((c) => toStoredPlace(c, fetchedAt)));
+          await saveSnapshot(opts.name, key, res, filtered.items);
+          const notes: string[] = [];
+          if (tried.length > 1) notes.push("实际检索词：" + tried.join(" / "));
+          if (filtered.dropped > 0) {
+            notes.push("已剔除 " + filtered.dropped + " 条远离「" + city + "」的境外/远端误匹配");
+          }
+          if (filtered.items.length === 0) {
+            return fmt({
+              ok: false,
+              availability: "unavailable",
+              data: null,
+              error:
+                "「" + (city ?? "") + "」没有检索到可用候选：原始结果 " + res.data.length +
+                " 条全部远离该城市（已按 60km 半径剔除）—— 请如实写「未取得来源」并列入 unconfirmed，不要拿境外同名点充数",
+              provenance: { provider: res.provenance.provider, source: res.provenance.source, confidence: "low" }
+            });
+          }
           const out = {
             ...res,
-            note: tried.length > 1 ? "实际检索词：" + tried.join(" / ") : undefined
+            data: filtered.items,
+            note: notes.length ? notes.join("；") : undefined
           };
           return fmt(out);
         }
@@ -552,6 +612,19 @@ export function createTools(deps: ToolDeps) {
         const fb = await fallback("find_local_alternative", key, "本地替代检索不可用：" + (res.error ?? "未知错误"));
         return fb ?? fmt(res);
       }
+      const center = await cityCenter(city);
+      const filtered = filterByCity(res.data, center);
+      if (filtered.items.length === 0) {
+        return fmt({
+          ok: false,
+          availability: "unavailable",
+          data: null,
+          error:
+            "检索到的候选点全部远离「" + (city ?? "目标城市") + "」（已按 60km 半径剔除 " + filtered.dropped +
+            " 条误匹配），本地替代点位无法用真实数据支撑 —— 请如实写「未取得来源」并列入 unconfirmed",
+          provenance: { provider: res.provenance.provider, source: res.provenance.source, confidence: "low" }
+        });
+      }
       let refLat = referenceLat;
       let refLon = referenceLon;
       let refName = referenceName ?? "";
@@ -565,7 +638,7 @@ export function createTools(deps: ToolDeps) {
           refName = hit.name;
         }
       }
-      const items = res.data.map((p) => {
+      const items = filtered.items.map((p) => {
         const base: Record<string, unknown> = {
           name: p.name,
           city: p.city,
@@ -586,8 +659,8 @@ export function createTools(deps: ToolDeps) {
         }
         return base;
       });
-      await repo?.upsertPlaces(res.data.map((c) => toStoredPlace(c, res.provenance.fetchedAt)));
-      await saveSnapshot("find_local_alternative", key, res, res.data);
+      await repo?.upsertPlaces(filtered.items.map((c) => toStoredPlace(c, res.provenance.fetchedAt)));
+      await saveSnapshot("find_local_alternative", key, res, filtered.items);
       return fmt({
         ok: true,
         availability: res.availability,
@@ -621,11 +694,24 @@ export function createTools(deps: ToolDeps) {
   );
 
   // ---- 审查关卡 ----
-  const readReport = (): (ReviewReport & { round: number; planHash: string }) | null => {
+  type StoredReport = ReviewReport & {
+    round: number;
+    planHash: string;
+    reviewedHashes?: string[];
+    /** 按 planHash 索引的历史结论 —— 行程没改动时重复审查直接复用，不重跑模型 */
+    reports?: Record<string, StoredReport>;
+    /**
+     * 最近一次**真正调用了审查模型**的结果。
+     * 封顶后的结论必须基于它重建，而不是基于上一轮封顶结果 ——
+     * 否则 warnings 会一轮轮累积（实测出现过两条 review/cap 叠在一起）。
+     */
+    lastRealReview?: StoredReport;
+  };
+  const readReport = (): StoredReport | null => {
     const raw = deps.workspace.read("review/report.json");
     if (!raw) return null;
     try {
-      return JSON.parse(raw) as ReviewReport & { round: number; planHash: string };
+      return JSON.parse(raw) as StoredReport;
     } catch {
       return null;
     }
@@ -651,12 +737,91 @@ export function createTools(deps: ToolDeps) {
       }
       const hash = planHash(raw);
       const prev = readReport();
-      const round = (prev?.round ?? 0) + 1;
+      // 轮次按「已审查过的不同版本数」计：同一份行程重复审查不再消耗轮次
+      const seenHashes: string[] = Array.isArray(prev?.reviewedHashes) ? prev.reviewedHashes : [];
+      const cached = prev?.reports?.[hash];
+
+      // 已审过且行程没变 → 直接复用结论，不再调模型。
+      // 实测（苏州 E2E）：同一份行程被反复送审 18 次，其中绝大多数是同一份内容，
+      // 每次都重跑一遍审查模型，纯烧 token 和时间。
+      if (cached) {
+        return fmt({
+          ok: true,
+          approved: cached.approved,
+          round: cached.round,
+          summary: cached.summary,
+          scores: cached.scores,
+          blocking: cached.blocking,
+          warnings: cached.warnings,
+          localAlternatives: cached.localAlternatives,
+          cached: true,
+          next: cached.approved
+            ? "这份行程已经审过且未改动，结论直接复用：**立刻调用 submit_itinerary，然后 finalize_itinerary**"
+            : "这份行程已经审过且未改动，结论直接复用：按 blocking 逐条修改 /itinerary.json（用 edit_file）后再审"
+        });
+      }
+
+      const round = seenHashes.includes(hash) ? Math.max(prev?.round ?? 1, 1) : seenHashes.length + 1;
+
+      // 审查轮次硬上限：超过上限就不再调模型，直接给一个「已封顶」的结论让主代理收工。
+      // 不封顶的话会陷入「审一轮→改一轮→再审一轮」的无限打磨（实测打到第 14 轮仍在改稿）。
+      if (round > MAX_REVIEW_ROUNDS && prev) {
+        // 基线必须是「最后一次真审」的结果，不能是上一轮的封顶结果 —— 否则 warnings 会累积
+        const base = prev.lastRealReview ?? prev;
+        const capped = {
+          ...base,
+          round,
+          planHash: hash,
+          approved: true,
+          blocking: [],
+          warnings: [
+            ...(base.warnings ?? []),
+            ...(base.blocking ?? []).map((b) => ({
+              ...b,
+              severity: "warning" as const,
+              code: b.code + "/未收敛",
+              title: "【已接受，不再修】" + b.title
+            })),
+            {
+              severity: "warning" as const,
+              code: "review/cap",
+              title: `审查已达第 ${round} 轮上限`,
+              detail:
+                `本轮未再调用审查模型（超过 ${MAX_REVIEW_ROUNDS} 轮上限）。` +
+                `此前审查已确认行程结构、时间地理与预算口径自洽；` +
+                `标注「已接受，不再修」的遗留项请写进 risks / unconfirmed 交人工复核，` +
+                `**不要再改行程结构**。`
+            }
+          ],
+          reviewedHashes: seenHashes.includes(hash) ? seenHashes : [...seenHashes, hash],
+          at: new Date().toISOString()
+        };
+        deps.workspace.write(
+          "review/report.json",
+          JSON.stringify({ ...capped, reports: { ...(prev.reports ?? {}), [hash]: capped } }, null, 2)
+        );
+        return fmt({
+          ok: true,
+          approved: true,
+          round,
+          capped: true,
+          summary: capped.summary,
+          scores: capped.scores,
+          blocking: [],
+          warnings: capped.warnings,
+          localAlternatives: capped.localAlternatives,
+          next:
+            "审查已封顶通过：**立刻调用 submit_itinerary，然后 finalize_itinerary**。" +
+            "不要再改 itinerary.json —— 标注「已接受，不再修」的遗留项写进 risks / unconfirmed 即可。"
+        });
+      }
+
       const report = await deps.reviewer({
         plan,
         planHash: hash,
         round,
         facts,
+        artifactFiles: deps.workspace.list().filter((f) => !f.startsWith("skills/")),
         requirements: deps.requirements ?? {
           destination: "（未知）",
           startDate: "",
@@ -670,9 +835,18 @@ export function createTools(deps: ToolDeps) {
         ...report,
         round,
         planHash: hash,
+        reviewedHashes: seenHashes.includes(hash) ? seenHashes : [...seenHashes, hash],
         at: new Date().toISOString()
       };
-      deps.workspace.write("review/report.json", JSON.stringify(payload, null, 2));
+      // 留一份按 hash 索引的历史结论，供「行程未改动时重复审查」直接复用
+      const reports: Record<string, unknown> = {
+        ...(prev?.reports ?? {}),
+        [hash]: payload
+      };
+      deps.workspace.write(
+        "review/report.json",
+        JSON.stringify({ ...payload, reports, lastRealReview: payload }, null, 2)
+      );
       return fmt({
         ok: true,
         approved: report.approved,
@@ -683,7 +857,7 @@ export function createTools(deps: ToolDeps) {
         warnings: report.warnings,
         localAlternatives: report.localAlternatives,
         next: report.approved
-          ? "审查通过：把 blocking 都改掉后调用 submit_itinerary"
+          ? "审查通过：**立刻调用 submit_itinerary，然后 finalize_itinerary**。不要再改 /itinerary.json —— 一改就得重新审，会陷入无限打磨。"
           : "有 blocking 问题：逐条修改 /itinerary.json（用 edit_file），改完重新调用 review_itinerary"
       });
     },

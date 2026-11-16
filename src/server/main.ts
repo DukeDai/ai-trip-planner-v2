@@ -10,11 +10,15 @@ import { HttpClient } from "../core/http.ts";
 import { TripStore, buildProfileMarkdown } from "../core/trips.ts";
 import { TravelData } from "../data/providers.ts";
 import { streamTurn, resumeTurn, findTripInterrupt, type InterruptInfo, type RunContext } from "../agent/runner.ts";
+import { installProcessGuard } from "../core/process-guard.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(here, "../..");
 const webDir = path.join(projectRoot, "web");
 const skillsSourceDir = path.join(projectRoot, "src", "agent", "skills");
+
+// 工具异常不许终止服务进程（单个工具失败不该打断整场规划）
+installProcessGuard();
 
 const config = loadConfig();
 fs.mkdirSync(config.tripsDir, { recursive: true });

@@ -15,6 +15,7 @@ import { TravelData } from "../src/data/providers.ts";
 import { MemorySaver, InMemoryStore } from "@langchain/langgraph";
 import { streamTurn } from "../src/agent/runner.ts";
 import { validatePlan } from "../src/core/schema.ts";
+import { installProcessGuard } from "../src/core/process-guard.ts";
 
 const SCENARIOS: Record<
   string,
@@ -76,6 +77,8 @@ if (!sc) {
   console.error("未知场景：" + which + "，可选：" + Object.keys(SCENARIOS).join(" / "));
   process.exit(2);
 }
+
+installProcessGuard();
 
 const config = loadConfig();
 fs.mkdirSync(config.tripsDir, { recursive: true });
@@ -178,18 +181,34 @@ if (plan) {
   console.log("条目缺 source:", noSource, "| 缺 city:", noCity, "| verified=false 未进 unconfirmed:", unverifiedMissing);
 }
 
-// 假数据扫描：产物里不允许出现任何内置种子库字样
+// 假数据扫描：
+//  - itinerary.json 里任何条目的 source 提到「种子库」= 硬失败（行程单引用了不存在的源）
+//  - 其它产物里出现旧标签「内置离线种子库（需复核）」= 硬失败
+//  - 其它产物里只是提到「种子库」（比如声明「未使用任何离线种子库」）= 只记信息，不算失败
 const artifacts = trips.listArtifacts(trip.id).filter((a) => !a.name.includes("skills/"));
 let seedHits = 0;
+let seedMentions = 0;
 for (const art of artifacts) {
   const content = trips.readArtifact(trip.id, art.name) ?? "";
-  if (content.includes("种子库") || content.includes("内置离线")) {
+  const hardBad = art.name === "itinerary.json"
+    ? /"source"\s*:\s*"[^"]*种子库/.test(content)
+    : content.includes("内置离线种子库（需复核）");
+  if (hardBad) {
     seedHits++;
-    console.log("!! 产物含假数据字样:", art.name);
+    console.log("!! 硬失败：产物引用了内置假数据:", art.name);
+  } else if (content.includes("种子库")) {
+    seedMentions++;
+    console.log("   （仅提及，未引用）", art.name);
   }
 }
-console.log("产物数:", artifacts.length, "| 含种子库字样的产物:", seedHits);
+console.log("产物数:", artifacts.length, "| 引用假数据的产物:", seedHits, "| 仅提及的产物:", seedMentions);
 console.log("产物清单:", artifacts.map((a) => a.name + "(" + a.bytes + "B)").join(", "));
+
+// 交付物完整性（SPEC §10 五个文件）
+const required = ["itinerary.json", "itinerary.md", "budget.csv", "packing.md", "bookings.md"];
+const names = new Set(artifacts.map((a) => a.name));
+const missing = required.filter((f) => !names.has(f));
+console.log("交付物完整性:", missing.length === 0 ? "齐备" : "缺 " + missing.join(", "));
 
 // 审查报告
 const reportRaw = trips.readArtifact(trip.id, "review/report.json");
